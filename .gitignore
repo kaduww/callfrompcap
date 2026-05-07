@@ -1,0 +1,16 @@
+# binary
+analise_pcap
+analise_pcap.exe
+callfrompcap
+callfrompcap.exe
+
+# build output
+/output/
+
+# macOS
+.DS_Store
+
+# editors
+.vscode/
+.idea/
+*.swp

@@ -1,35 +1,37 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Instala as dependências do analise_pcap no Windows.
+    Instala as dependências do callfrompcap no Windows e compila o binário.
 .DESCRIPTION
-    Usa winget para instalar Wireshark (tshark), ffmpeg e Python 3.11.
-    Cria um virtualenv local e instala scapy via pip.
+    Usa winget para instalar Go e ffmpeg (opcional).
+    Compila o binário callfrompcap.exe com go build.
 .NOTES
     Requer Windows 10 1709+ ou Windows 11 (winget incluído).
     Execute em PowerShell com:
         Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-        .\install_windows.ps1
+        .\scripts\install_windows.ps1
 #>
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$GoMinMinor = 22   # requer Go 1.22+
+
 # ── Banner ────────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════╗"
-Write-Host "║  analise_pcap — instalação Windows       ║"
+Write-Host "║  callfrompcap — instalação Windows       ║"
 Write-Host "╚══════════════════════════════════════════╝"
 Write-Host ""
 
-# ── Admin (winget precisa para instalar Wireshark no sistema) ─────────────────
+# ── Admin ─────────────────────────────────────────────────────────────────────
 $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin   = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $isAdmin) {
     Write-Host "Reiniciando como Administrador..."
-    $args = "-ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`""
-    Start-Process powershell $args -Verb RunAs
+    $argList = "-ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`""
+    Start-Process powershell $argList -Verb RunAs
     exit
 }
 
@@ -50,76 +52,76 @@ function Update-SessionPath {
     $env:PATH    = "$machinePath;$userPath"
 }
 
-# ── 1. Wireshark (inclui tshark) ──────────────────────────────────────────────
-Write-Host "[1/4] Instalando Wireshark (tshark)..."
-winget install --id WiresharkFoundation.Wireshark `
-    --accept-source-agreements --accept-package-agreements `
-    --silent --scope machine
-Update-SessionPath
-
-if (-not (Get-Command tshark -ErrorAction SilentlyContinue)) {
-    # Wireshark não adicionou ao PATH ainda — adiciona manualmente
-    $wiresharkDir = Join-Path $env:ProgramFiles 'Wireshark'
-    if (Test-Path $wiresharkDir) {
-        $machinePath = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
-        if ($machinePath -notlike "*$wiresharkDir*") {
-            [Environment]::SetEnvironmentVariable('PATH', "$machinePath;$wiresharkDir", 'Machine')
-            Update-SessionPath
+# ── Função: verifica versão mínima do Go ─────────────────────────────────────
+function Test-GoVersion {
+    try {
+        $ver = & go version 2>$null
+        if ($ver -match 'go1\.(\d+)') {
+            return ([int]$Matches[1] -ge $GoMinMinor)
         }
-    }
+    } catch {}
+    return $false
 }
-Write-Host "       tshark: $(tshark --version | Select-Object -First 1)"
 
-# ── 2. ffmpeg ─────────────────────────────────────────────────────────────────
-Write-Host "[2/4] Instalando ffmpeg..."
-winget install --id Gyan.FFmpeg `
-    --accept-source-agreements --accept-package-agreements `
-    --silent
-Update-SessionPath
-if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
-    Write-Host "       $(ffmpeg -version 2>&1 | Select-Object -First 1)"
+# ── 1. Go ─────────────────────────────────────────────────────────────────────
+Write-Host "[1/2] Verificando Go..."
+
+if (Test-GoVersion) {
+    Write-Host "       $(go version) — OK"
 } else {
-    Write-Host "       ffmpeg instalado (reinicie o terminal para atualizar o PATH)"
-}
-
-# ── 3. Python 3.11 ───────────────────────────────────────────────────────────
-Write-Host "[3/4] Verificando Python..."
-$pythonOk = $false
-if (Get-Command python -ErrorAction SilentlyContinue) {
-    $ver = python --version 2>&1
-    if ($ver -match 'Python 3\.(8|9|10|11|12|13)') {
-        Write-Host "       $ver já instalado — pulando"
-        $pythonOk = $true
-    }
-}
-
-if (-not $pythonOk) {
-    Write-Host "       Instalando Python 3.11..."
-    winget install --id Python.Python.3.11 `
+    Write-Host "       Instalando Go via winget..."
+    winget install --id Go.Go `
         --accept-source-agreements --accept-package-agreements `
         --silent
     Update-SessionPath
+
+    if (-not (Test-GoVersion)) {
+        # Fallback: adiciona localização padrão ao PATH
+        $goDir = Join-Path $env:ProgramFiles 'Go\bin'
+        if (Test-Path $goDir) {
+            $machinePath = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
+            [Environment]::SetEnvironmentVariable('PATH', "$machinePath;$goDir", 'Machine')
+            Update-SessionPath
+        }
+    }
+    Write-Host "       $(go version)"
 }
 
-# ── 4. Virtualenv + dependências Python ──────────────────────────────────────
-Write-Host "[4/4] Criando virtualenv e instalando dependências Python..."
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $scriptDir
+# ── 2. ffmpeg (opcional — G.729 / G.722) ─────────────────────────────────────
+Write-Host "[2/2] Instalando ffmpeg (opcional)..."
+try {
+    winget install --id Gyan.FFmpeg `
+        --accept-source-agreements --accept-package-agreements `
+        --silent
+    Update-SessionPath
+    if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
+        Write-Host "       $(ffmpeg -version 2>&1 | Select-Object -First 1)"
+    } else {
+        Write-Host "       ffmpeg instalado (reinicie o terminal para atualizar o PATH)"
+    }
+} catch {
+    Write-Host "       AVISO: ffmpeg não instalado."
+    Write-Host "              G.729 e G.722 não serão decodificados para WAV."
+}
 
-python -m venv .venv
-& .\.venv\Scripts\pip install --upgrade pip --quiet
-& .\.venv\Scripts\pip install -r requirements.txt
+# ── Compilar ──────────────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "Compilando callfrompcap.exe..."
+$scriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
+$projectDir = Split-Path -Parent $scriptDir
+Set-Location $projectDir
+
+go build -o callfrompcap.exe .
+Write-Host "   Binário gerado: $projectDir\callfrompcap.exe"
 
 # ── Concluído ─────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "════════════════════════════════════════════"
 Write-Host " Instalação concluída."
 Write-Host ""
-Write-Host " Para usar (PowerShell):"
-Write-Host "   .\.venv\Scripts\Activate.ps1"
-Write-Host "   python main.py <arquivo.pcap> -o .\output"
+Write-Host " Para usar:"
+Write-Host "   .\callfrompcap.exe <arquivo.pcap> -o .\output"
 Write-Host ""
-Write-Host " Para usar (Prompt de Comando):"
-Write-Host "   .\.venv\Scripts\activate.bat"
-Write-Host "   python main.py <arquivo.pcap> -o .\output"
+Write-Host " Dica: caminhos com espaços devem estar entre aspas:"
+Write-Host '   .\callfrompcap.exe "C:\Capturas\arquivo pcap.pcap" -o .\output'
 Write-Host "════════════════════════════════════════════"

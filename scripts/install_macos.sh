@@ -1,54 +1,71 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+GO_MIN_MINOR=22   # requer Go 1.22+
+
 echo "╔══════════════════════════════════════════╗"
-echo "║  analise_pcap — instalação macOS         ║"
+echo "║  callfrompcap — instalação macOS         ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
-# ── Homebrew ─────────────────────────────────────────────────────────────────
+# ── Homebrew ──────────────────────────────────────────────────────────────────
 if ! command -v brew &>/dev/null; then
-    echo "[1/4] Instalando Homebrew..."
+    echo "[1/3] Instalando Homebrew..."
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    # Adiciona brew ao PATH da sessão atual (Apple Silicon / Intel)
     if [ -f /opt/homebrew/bin/brew ]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
     else
         eval "$(/usr/local/bin/brew shellenv)"
     fi
 else
-    echo "[1/4] Homebrew já instalado — pulando"
+    echo "[1/3] Homebrew já instalado — pulando"
 fi
 
-# ── tshark ────────────────────────────────────────────────────────────────────
-if ! command -v tshark &>/dev/null; then
-    echo "[2/4] Instalando wireshark (inclui tshark)..."
-    brew install wireshark
+# ── Go ────────────────────────────────────────────────────────────────────────
+echo "[2/3] Verificando Go..."
+
+go_meets_minimum() {
+    command -v go &>/dev/null || return 1
+    local minor
+    minor=$(go version | grep -oE 'go1\.[0-9]+' | grep -oE '[0-9]+$')
+    [ "${minor:-0}" -ge "$GO_MIN_MINOR" ]
+}
+
+if go_meets_minimum; then
+    echo "       $(go version) — OK"
 else
-    echo "[2/4] tshark já instalado ($(tshark --version | head -1)) — pulando"
+    echo "       Instalando Go via Homebrew..."
+    brew install go
+    echo "       $(go version)"
 fi
 
-# ── Python 3 ─────────────────────────────────────────────────────────────────
-if ! command -v python3 &>/dev/null; then
-    echo "[3/4] Instalando Python 3..."
-    brew install python
+# ── ffmpeg (opcional — G.729 / G.722) ─────────────────────────────────────────
+echo "[3/3] Verificando ffmpeg (opcional)..."
+if command -v ffmpeg &>/dev/null; then
+    echo "       ffmpeg já instalado — pulando"
 else
-    echo "[3/4] Python $(python3 --version) já instalado — pulando"
+    if brew install ffmpeg 2>/dev/null; then
+        echo "       $(ffmpeg -version 2>&1 | head -1)"
+    else
+        echo "       AVISO: ffmpeg não instalado."
+        echo "              G.729 e G.722 não serão decodificados para WAV."
+    fi
 fi
 
-# ── Virtualenv + dependências Python ─────────────────────────────────────────
-echo "[4/4] Criando virtualenv e instalando dependências Python..."
-python3 -m venv .venv
-# shellcheck disable=SC1091
-source .venv/bin/activate
-pip install --upgrade pip --quiet
-pip install -r requirements.txt
+# ── Compilar ──────────────────────────────────────────────────────────────────
+echo ""
+echo "Compilando callfrompcap..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
+go build -o callfrompcap .
+echo "   Binário gerado: $PROJECT_DIR/callfrompcap"
 
+# ── Concluído ─────────────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════════"
 echo " Instalação concluída."
 echo ""
 echo " Para usar:"
-echo "   source .venv/bin/activate"
-echo "   python main.py <arquivo.pcap> -o ./output"
+echo "   ./callfrompcap <arquivo.pcap> -o ./output"
 echo "════════════════════════════════════════════"

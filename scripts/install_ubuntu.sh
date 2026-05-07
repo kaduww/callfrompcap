@@ -1,36 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── Detecta Ubuntu e versão ───────────────────────────────────────────────────
+GO_MIN_MINOR=22   # requer Go 1.22+
+
+# ── Detecta distro e versão ───────────────────────────────────────────────────
 if [ ! -f /etc/os-release ]; then
-    echo "ERRO: /etc/os-release não encontrado. Este script é para Ubuntu."
+    echo "ERRO: /etc/os-release não encontrado. Este script é para Ubuntu ou Debian."
     exit 1
 fi
 . /etc/os-release
 
-if [ "${ID:-}" != "ubuntu" ]; then
-    echo "ERRO: sistema detectado como '$ID'. Este script é para Ubuntu."
-    exit 1
-fi
-
-UBUNTU_VERSION="${VERSION_ID}"   # ex: "22.04", "24.04", "26.04"
-CODENAME="${VERSION_CODENAME:-desconhecido}"
-
-case "$UBUNTU_VERSION" in
-    22.04) ;;   # Jammy  — Python 3.10
-    24.04) ;;   # Noble  — Python 3.12
-    26.04) ;;   # Q*     — Python 3.14+ (não lançado ainda; pacotes compatíveis)
+case "${ID:-}" in
+    ubuntu)
+        case "${VERSION_ID}" in
+            22.04|24.04|26.04) ;;
+            *) echo "AVISO: Ubuntu ${VERSION_ID} não testado. Prosseguindo mesmo assim..." ;;
+        esac
+        ;;
+    debian)
+        case "${VERSION_ID}" in
+            11|12|13) ;;
+            *) echo "AVISO: Debian ${VERSION_ID} não testado. Prosseguindo mesmo assim..." ;;
+        esac
+        ;;
     *)
-        echo "AVISO: Ubuntu $UBUNTU_VERSION não testado. Prosseguindo mesmo assim..."
+        echo "ERRO: sistema detectado como '${ID:-desconhecido}'. Este script é para Ubuntu ou Debian."
+        exit 1
         ;;
 esac
 
+DISTRO_LABEL="${ID^} ${VERSION_ID} (${VERSION_CODENAME:-?})"
+
 echo "╔══════════════════════════════════════════╗"
-printf  "║  analise_pcap — Ubuntu %-18s║\n" "$UBUNTU_VERSION ($CODENAME)"
+printf  "║  callfrompcap — %-26s║\n" "$DISTRO_LABEL"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
-# ── Permissão root necessária para apt ───────────────────────────────────────
+# ── Permissão root ────────────────────────────────────────────────────────────
 if [ "$EUID" -ne 0 ]; then
     echo "ERRO: execute com sudo ou como root."
     echo "  sudo bash $0"
@@ -38,32 +44,54 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 REAL_USER="${SUDO_USER:-$USER}"
-INSTALL_DIR="$(pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# ── 1. Atualiza cache apt ─────────────────────────────────────────────────────
-echo "[1/5] Atualizando cache apt..."
+# ── 1. Dependências base ──────────────────────────────────────────────────────
+echo "[1/3] Atualizando cache apt e instalando dependências base..."
 apt-get update -qq
+apt-get install -y curl tar ca-certificates
 
-# ── 2. tshark ─────────────────────────────────────────────────────────────────
-echo "[2/5] Instalando tshark..."
+# ── 2. Go ─────────────────────────────────────────────────────────────────────
+echo "[2/3] Verificando Go..."
 
-# Responde à pergunta interativa do debconf sem exibir prompt:
-# "Should non-superusers be able to capture packets?" → false
-# (leitura de arquivo pcap não exige permissão de captura)
-echo "wireshark-common wireshark-common/install-setuid boolean false" \
-    | debconf-set-selections
+go_meets_minimum() {
+    command -v go &>/dev/null || return 1
+    local minor
+    minor=$(go version | grep -oE 'go1\.[0-9]+' | grep -oE '[0-9]+$')
+    [ "${minor:-0}" -ge "$GO_MIN_MINOR" ]
+}
 
-DEBIAN_FRONTEND=noninteractive apt-get install -y tshark
-echo "       $(tshark --version | head -1)"
-
-# ── 3. ffmpeg (opcional — necessário para G.729 / G.722) ─────────────────────
-echo "[3/5] Instalando ffmpeg..."
-# ffmpeg está no repositório universe; habilita se necessário
-if ! grep -qr "^deb.*universe" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
-    add-apt-repository -y universe
-    apt-get update -qq
+if go_meets_minimum; then
+    echo "       $(go version) — OK"
+else
+    echo "       Baixando Go da golang.org..."
+    GO_VER=$(curl -fsSL "https://go.dev/VERSION?m=text" | head -1)
+    TARBALL="${GO_VER}.linux-amd64.tar.gz"
+    curl -fsSL "https://go.dev/dl/${TARBALL}" -o "/tmp/${TARBALL}"
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf "/tmp/${TARBALL}"
+    rm -f "/tmp/${TARBALL}"
+    echo 'export PATH=$PATH:/usr/local/go/bin' > /etc/profile.d/go.sh
+    export PATH="$PATH:/usr/local/go/bin"
+    echo "       $(go version)"
 fi
 
+# ── 3. ffmpeg (opcional — G.729 / G.722) ─────────────────────────────────────
+echo "[3/3] Instalando ffmpeg (opcional)..."
+if [ "${ID}" = "ubuntu" ]; then
+    # Ubuntu: ffmpeg está no repositório universe
+    if ! grep -qr "^deb.*universe" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+        if command -v add-apt-repository &>/dev/null; then
+            add-apt-repository -y universe
+        else
+            apt-get install -y software-properties-common
+            add-apt-repository -y universe
+        fi
+        apt-get update -qq
+    fi
+fi
+# Debian: ffmpeg está no repositório main — nenhuma fonte extra necessária
 if apt-get install -y ffmpeg 2>/dev/null; then
     echo "       $(ffmpeg -version 2>&1 | head -1)"
 else
@@ -71,32 +99,22 @@ else
     echo "              G.729 e G.722 não serão decodificados para WAV."
 fi
 
-# ── 4. Python 3 + venv ────────────────────────────────────────────────────────
-echo "[4/5] Instalando Python 3 e dependências de venv..."
-apt-get install -y python3 python3-venv python3-pip
-echo "       $(python3 --version)"
-
-# ── 5. Virtualenv + dependências Python ──────────────────────────────────────
-echo "[5/5] Criando virtualenv e instalando dependências Python..."
-cd "$INSTALL_DIR"
-python3 -m venv .venv
-
-su -s /bin/bash "$REAL_USER" -c "
-    set -e
-    cd '$INSTALL_DIR'
-    source .venv/bin/activate
-    pip install --upgrade pip --quiet
-    pip install -r requirements.txt
-"
-
-chown -R "$REAL_USER":"$(id -gn "$REAL_USER")" .venv
+# ── Compilar ──────────────────────────────────────────────────────────────────
+echo ""
+echo "Compilando callfrompcap..."
+cd "$PROJECT_DIR"
+su -s /bin/bash "$REAL_USER" -c "cd '$PROJECT_DIR' && /usr/local/go/bin/go build -o callfrompcap ."
+chown "$REAL_USER":"$(id -gn "$REAL_USER")" "$PROJECT_DIR/callfrompcap"
+echo "   Binário gerado: $PROJECT_DIR/callfrompcap"
 
 # ── Concluído ─────────────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════════"
-echo " Instalação concluída (Ubuntu $UBUNTU_VERSION)."
+echo " Instalação concluída ($DISTRO_LABEL)."
 echo ""
 echo " Para usar:"
-echo "   source .venv/bin/activate"
-echo "   python main.py <arquivo.pcap> -o ./output"
+echo "   ./callfrompcap <arquivo.pcap> -o ./output"
+echo ""
+echo " NOTA: abra um novo terminal ou execute:"
+echo "   source /etc/profile.d/go.sh"
 echo "════════════════════════════════════════════"

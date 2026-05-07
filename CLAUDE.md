@@ -5,88 +5,88 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Purpose
 
 CLI tool to analyze PCAP files containing VoIP traffic. For each call found, it extracts and exports:
-- The full SIP trace (signaling)
-- The RTP media streams (audio)
-- A CSV index file (`index.csv`) with columns: `call_id`, `request_user`, `directory`
-
-Each call is saved in its own subdirectory under the output path, named after the Call-ID or a sanitized slug of it.
+- Full SIP trace (`sip_trace.txt`) — one block per message, in arrival order
+- Per-SSRC RTP streams (`rtp_<ssrc>.pcap`) — valid PCAP openable in Wireshark
+- Decoded audio (`rtp_<ssrc>.wav`) — G.711 natively; G.729/G.722 via optional ffmpeg
+- CSV index (`index.csv`) — columns: `call_id`, `request_user`, `final_code`, `final_reason`, `directory`
 
 ## Stack
 
-- **Language**: Python 3
-- **PCAP parsing**: `tshark` subprocess (system binary) — filters packets natively before Python sees them
-- **SIP dissection**: raw byte parsing of UDP payload after tshark filters with `-Y sip`
-- **RTP extraction**: tshark `-Y rtp -w -` pipe → scapy `PcapReader` → route by SDP-discovered endpoints
-- **Output formats**: plain-text SIP trace (`sip_trace.txt`, one message per block), per-SSRC PCAP files (`rtp_<ssrc>.pcap`) opened with Wireshark
+- **Language**: Go 1.22 — single static binary, zero runtime dependencies
+- **PCAP reading**: pure Go reader (`pcap.go`) — reads `.pcap` directly; pcapng not supported (clear error message)
+- **Packet parsing**: manual Ethernet/SLL/raw-IP → IPv4 → UDP extraction (`parse.go`)
+- **SIP dissection**: raw string parsing of UDP payload (`sipparser.go`)
+- **RTP routing**: SDP-discovered (IP, port) endpoint map → per-SSRC pcap writers (`rtpextractor.go`)
+- **Audio decode**: G.711 PCMU/PCMA via pure Go lookup tables; G.729/G.722 via `ffmpeg` subprocess if available (`audio.go`)
 
-## Critical constraint: files up to 44 GB
+## Build
 
-**Never load the file into memory.** All reading is done via streaming:
-- tshark is launched as a subprocess with `-w -` (write pcap to stdout)
-- Python reads the pipe through `scapy.utils.PcapReader(proc.stdout)` — one packet at a time
-- Two separate passes: Pass 1 = SIP only (small), Pass 2 = RTP only (large)
-- SIP trace files are opened/written/closed per packet to avoid hitting OS file-handle limits
-- RTP `PcapWriter` handles are kept open (with `sync=False`) and closed at end of Pass 2
+```bash
+go build -o callfrompcap .        # local binary
+CGO_ENABLED=0 go build -o callfrompcap .   # fully static (Linux)
+```
+
+No external Go dependencies — `go mod tidy` not required after cloning.
 
 ## Architecture
 
 ```
-analise_pcap/
-├── main.py              # CLI (argparse): single-pass default, --two-pass, --sip-only
-├── analyzer.py          # Single-pass analyze(): combined_stream → process_sip/rtp_pkt
-├── pcap_reader.py       # sip_stream(), rtp_stream(), combined_stream() via tshark pipe
-├── sip_parser.py        # Parse raw SIP bytes → call_id, request_user, sdp_endpoints, rtpmap
-├── sip_extractor.py     # process_sip_pkt() + extract_calls() (two-pass wrapper)
-├── rtp_extractor.py     # process_rtp_pkt() + extract_rtp() (two-pass wrapper)
-├── audio_decoder.py     # G.711/G.729/G.722 decode + WavWriter/FfmpegWriter
-├── exporter.py          # write_index_csv()
-└── models.py            # Call dataclass (includes rtpmap field)
+callfrompcap/
+├── main.go          # CLI flags: -o, --sip-only, --two-pass, --method, --sip-code
+├── analyzer.go      # analyze(): single-pass, routes SIP/RTP in one file read
+├── pcap.go          # PcapReader (1 MB bufio) + PcapWriter (64 KB bufio)
+├── parse.go         # parseUDP() — handles DLT 1/113/228/12
+├── sipparser.go     # parseSIP() → SIPInfo{CallID, Method, StatusCode, StatusReason, …}
+├── sipextractor.go  # processSIPPkt(), extractCalls(), _SipFileCache (LRU 500 handles)
+├── rtpextractor.go  # processRTPPkt(), extractRTP()
+├── audio.go         # ulawTable/alawTable, WavWriter, FfmpegWriter, makeWriter()
+├── exporter.go      # writeCSV() — codeFilter applied here, not during processing
+├── model.go         # Call{FinalCode, FinalReason, …}, Endpoint, CodecInfo
+└── progress.go      # Progress — \r status line, updated every 2s / 10k packets
 ```
 
 **Data flow — single-pass (default):**
 ```
-tshark -Y "sip or rtp" -w - │ combined_stream() → SIP? → process_sip_pkt()
-                                                → RTP? → process_rtp_pkt()
-                                                       → exporter (index.csv)
+pcap file → PcapReader.Next() → parseUDP()
+    ├─ byte[0] & 0xC0 == 0x80  →  RTP  → processRTPPkt()
+    └─ byte[0] printable ASCII →  SIP  → processSIPPkt() → updates FinalCode/FinalReason
+                                                          → writeCSV() (with codeFilter)
 ```
 
 **Data flow — two-pass (`--two-pass`):**
 ```
-tshark -Y sip -w - │ sip_stream() → extract_calls() → {endpoint_map, calls} ┐
-                                                                               ├→ exporter
-tshark -Y rtp -w - │ rtp_stream() → extract_rtp(endpoint_map) ───────────────┘
+pcap file → extractCalls(methodFilter) → {endpointMap, calls}
+pcap file → extractRTP(endpointMap)
+            → writeCSV(calls, codeFilter)
 ```
 
-## CLI Usage
+## CLI
 
 ```bash
-python main.py <file.pcap> --output ./output
-```
+./callfrompcap <file.pcap> [options]
 
-Output structure:
-```
-output/
-├── index.csv
-└── <call-id-slug>/
-    ├── sip_trace.txt
-    └── rtp_<ssrc>.pcap   # one file per SSRC, valid PCAP openable in Wireshark
+-o / --output <dir>    output directory (default: ./output)
+--sip-only             SIP traces only, no RTP
+--two-pass             read file twice (SIP then RTP)
+--method <csv>         initial SIP methods to process, e.g. INVITE or INVITE,REGISTER
+--sip-code <csv>       final response codes to include in index.csv, e.g. 200 or 200,486
 ```
 
 ## Key Design Rules
 
-- **Call-ID** is the primary key for grouping all SIP messages and RTP streams.
-- **`request_user`** = user part of the INVITE Request-URI (e.g., `1234` from `INVITE sip:1234@example.com`). Updated from the first INVITE seen for each Call-ID.
-- Directory names are filesystem-safe slugs: `re.sub(r'[^\w\-]', '_', call_id)[:100]`. Collisions resolved by appending `_2`, `_3`, etc.
-- RTP endpoint correlation: SDP `c=` line provides IP, `m=audio <port>` provides port. Both `(src_ip, src_port)` and `(dst_ip, dst_port)` are checked against `endpoint_map`.
-- Unknown RTP (no matching SDP seen yet) is silently skipped — not written to disk.
-- SSRC is extracted manually from RTP header bytes 8–11 (big-endian uint32).
-- **Audio decoding** (`audio_decoder.make_writer()`): resolution order: (1) G.711 PCMU/PCMA pure-Python — uses `audioop` on Python ≤ 3.12, lookup tables on 3.13+; (2) dynamic PT from `call.rtpmap` matched against G.711 or ffmpeg tables; (3) static ffmpeg PTs — PT 9 = G.722 (`-f g722`), PT 18 = G.729 (`-f g729`). `FfmpegWriter` pipes raw payloads to `ffmpeg stdin` incrementally — no buffering. Packets written in arrival order (no jitter buffer).
-- **Per SSRC stream output**: `rtp_<ssrc>.pcap` always; `rtp_<ssrc>.wav` when codec is G.711 (no deps), G.722 or G.729 (requires `ffmpeg` in PATH).
+- **Call-ID** is the primary key for all SIP messages and RTP streams.
+- **`request_user`** = user part of the INVITE Request-URI (e.g., `1234` from `INVITE sip:1234@example.com`).
+- **`final_code` / `final_reason`**: updated on every SIP response with code ≥ 200; reflects the last final response seen (handles retries and re-INVITEs correctly).
+- **`--method` filter**: acts at call-creation time in `processSIPPkt`. Rejected Call-IDs are tracked in `rejectedIDs` to skip all subsequent packets (responses, BYE, etc.) for the same dialog.
+- **`--sip-code` filter**: acts only in `writeCSV`. All directories and `sip_trace.txt` files are always created; only CSV rows are filtered. This preserves the streaming architecture (you can't know the final code until the call ends).
+- Directory names: `[^A-Za-z0-9_\-]` → `_`, max 100 chars, collisions resolved with `_2`, `_3`, etc.
+- RTP endpoint correlation: SDP `c=` (IP) + `m=audio <port>` → `Endpoint{IP, Port}`. Both src and dst checked against `endpointMap`.
+- Unknown RTP (no prior SDP seen) is silently skipped.
+- SSRC: extracted from RTP header bytes 8–11 (big-endian uint32), formatted as `rtp_0a1b2c3d.pcap`.
+- **Audio decode priority** (`makeWriter`): (1) static G.711 PT 0/8; (2) dynamic PT from rtpmap matching PCMU/PCMA/G722/G729; (3) static ffmpeg PTs 9=G.722, 18=G.729.
+- **`_SipFileCache`**: LRU of 500 open `sip_trace.txt` file handles — avoids open/close per packet, which is the dominant bottleneck for SIP-heavy captures.
+- **pcapng**: not supported — returns an error with the tshark conversion command.
 
-## Dependencies
+## Optional dependency
 
-```bash
-pip install -r requirements.txt   # installs scapy
-```
-
-System dependency: `tshark` — `brew install wireshark` (macOS) or `apt install tshark` (Linux).
+`ffmpeg` in PATH enables WAV output for G.729 and G.722. Without it, those calls produce only `.pcap`.
