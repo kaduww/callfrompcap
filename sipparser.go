@@ -13,6 +13,7 @@ type SIPInfo struct {
 	StatusReason string // response reason phrase (e.g. "OK", "Busy Here"); empty for requests
 	CSeqMethod   string // method from CSeq header (tells which request a response belongs to)
 	RequestUser  string
+	FromUser     string
 	SDPEndpoints []Endpoint
 	RTPMap       map[int]CodecInfo
 	Text         string
@@ -66,6 +67,10 @@ func parseSIP(payload []byte) *SIPInfo {
 		if key == "call-id" || key == "i" {
 			if info.CallID == "" {
 				info.CallID = val
+			}
+		} else if key == "from" || key == "f" {
+			if info.FromUser == "" {
+				info.FromUser = sipURIUser(val)
 			}
 		} else if key == "cseq" {
 			// CSeq: <seq-number> <method>
@@ -163,4 +168,23 @@ func parseSIP(payload []byte) *SIPInfo {
 	}
 
 	return info
+}
+
+// sipURIUser extracts the user part from a SIP From/To header value.
+// Handles both "Display Name <sip:user@host>" and "sip:user@host" forms.
+func sipURIUser(val string) string {
+	lower := strings.ToLower(val)
+	idx := strings.Index(lower, "sip:")
+	if idx < 0 {
+		return ""
+	}
+	userPart := val[idx+4:]
+	end := len(userPart)
+	for i, ch := range userPart {
+		if ch == '@' || ch == ';' || ch == '?' || ch == '>' || ch == ' ' || ch == '\t' {
+			end = i
+			break
+		}
+	}
+	return userPart[:end]
 }

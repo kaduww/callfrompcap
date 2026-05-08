@@ -20,16 +20,19 @@ output/
 
 **`index.csv`**
 ```
-call_id,request_user,final_code,final_reason,duration,mos,jitter_ms,loss_pct,media_flow,directory
-abc-123@pbx,1001,200,OK,142,4.32,1.25,0.00,both,/output/abc-123_pbx
-def-456@pbx,1002,486,Busy Here,,,,,,/output/def-456_pbx
-ghi-789@pbx,1003,200,OK,37,3.71,8.43,1.20,caller-only,/output/ghi-789_pbx
+call_id,from_user,request_user,src_ip,dst_ip,final_code,final_reason,duration,mos,jitter_ms,loss_pct,media_flow,directory
+abc-123@pbx,1001,1002,192.168.1.10,192.168.1.1,200,OK,142,4.32,1.25,0.00,both,/output/abc-123_pbx
+def-456@pbx,1003,1004,192.168.1.11,192.168.1.1,486,Busy Here,,,,,,/output/def-456_pbx
+ghi-789@pbx,1005,1006,192.168.1.12,192.168.1.1,200,OK,37,3.71,8.43,1.20,caller-only,/output/ghi-789_pbx
 ```
 
 | Column | Description |
 |---|---|
 | `call_id` | SIP Call-ID |
+| `from_user` | User part of the From header URI (caller's identity) |
 | `request_user` | User part of the INVITE Request-URI (dialed number) |
+| `src_ip` | Source IP of the first packet that created the dialog |
+| `dst_ip` | Destination IP of the first packet that created the dialog |
 | `final_code` | Last final SIP response code (≥ 200) |
 | `final_reason` | Reason phrase of the final code |
 | `duration` | Duration in seconds (from 200 OK to INVITE until response to BYE); empty if the call was not answered |
@@ -127,7 +130,7 @@ winget install Gyan.FFmpeg
 | `--method` | all | Initial SIP methods to include, comma-separated |
 | `--sip-code` | all | Final response codes to include in CSV, comma-separated |
 | `--mix-audio` | — | Mix all WAV streams of each call into `rtp_mixed.wav` (requires ffmpeg) |
-| `--quiet` | — | Suppress per-event output; show only the progress bar |
+| `--verbose` | — | Print per-event output; hides the progress bar |
 
 ### `--method`
 

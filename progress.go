@@ -31,10 +31,10 @@ func newProgress(totalBytes int64) *Progress {
 }
 
 // tick increments the packet counter and prints progress if enough time has elapsed.
-// Only active in --quiet mode; in verbose mode the event log already shows activity.
+// Only active when --verbose is not set; in verbose mode the event log already shows activity.
 func (p *Progress) tick(bytesRead int64, extra string) {
 	p.n++
-	if !quietMode {
+	if verboseMode {
 		return
 	}
 	if p.n%progressCheckInterval != 0 {

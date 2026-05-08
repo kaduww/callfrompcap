@@ -134,12 +134,15 @@ func processSIPPkt(
 		if err := os.MkdirAll(callDir, 0755); err != nil {
 			return fmt.Errorf("creating call directory %s: %w", callDir, err)
 		}
-		call = newCall(info.CallID, info.RequestUser, callDir)
+		call = newCall(info.CallID, info.RequestUser, info.FromUser, pkt.srcIP, pkt.dstIP, callDir)
 		calls[info.CallID] = call
 		logEvent("[call]  %s  →  %s", call.CallID, callDir)
 	} else {
 		if info.RequestUser != "" && call.RequestUser == "" {
 			call.RequestUser = info.RequestUser
+		}
+		if info.FromUser != "" && call.FromUser == "" {
+			call.FromUser = info.FromUser
 		}
 	}
 

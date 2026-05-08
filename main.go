@@ -11,14 +11,14 @@ import (
 	"time"
 )
 
-// quietMode suppresses event output when true (set by --quiet flag).
-// Default false: events are printed, \r progress is hidden.
-// When true: events are hidden, \r progress is shown.
-var quietMode bool
+// verboseMode enables per-event output when true (set by --verbose flag).
+// Default false: events are hidden, \r progress is shown.
+// When true: events are printed, \r progress is hidden.
+var verboseMode bool
 
-// logEvent prints a timestamped event line to stdout unless --quiet is set.
+// logEvent prints a timestamped event line to stdout only when --verbose is set.
 func logEvent(format string, args ...any) {
-	if quietMode {
+	if !verboseMode {
 		return
 	}
 	fmt.Printf(time.Now().Format("15:04:05")+"  "+format+"\n", args...)
@@ -31,7 +31,7 @@ func main() {
 	twoPass := flag.Bool("two-pass", false, "read file twice (SIP then RTP)")
 	methodFlag := flag.String("method", "", "comma-separated SIP methods to include (e.g. INVITE,REGISTER); default: all")
 	codeFlag   := flag.String("sip-code", "", "comma-separated final SIP response codes to include in CSV (e.g. 200,486); default: all")
-	quietFlag    := flag.Bool("quiet", false, "suppress per-event output; show only the progress line")
+	verboseFlag  := flag.Bool("verbose", false, "print per-event output; hides the progress line")
 	mixAudioFlag := flag.Bool("mix-audio", false, "mix per-SSRC WAV files into a single rtp_mixed.wav per call (requires ffmpeg)")
 
 	// Support long form --output as alias for -o
@@ -48,7 +48,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "                       examples: INVITE  |  INVITE,REGISTER  |  OPTIONS\n")
 		fmt.Fprintf(os.Stderr, "  --sip-code <codes>   final SIP response codes to include in CSV (default: all)\n")
 		fmt.Fprintf(os.Stderr, "                       examples: 200  |  200,486  |  404,480,486\n")
-		fmt.Fprintf(os.Stderr, "  --quiet              suppress per-event output; show only the progress line\n")
+		fmt.Fprintf(os.Stderr, "  --verbose            print per-event output; hides the progress line\n")
 		fmt.Fprintf(os.Stderr, "  --mix-audio          mix per-SSRC WAV files into rtp_mixed.wav per call (requires ffmpeg)\n")
 	}
 
@@ -60,7 +60,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	quietMode = *quietFlag
+	verboseMode = *verboseFlag
 	out := *outputDir
 
 	// Expand globs (needed on Windows; harmless on Unix where the shell already expands)

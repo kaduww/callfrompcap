@@ -16,6 +16,9 @@ type CodecInfo struct {
 type Call struct {
 	CallID          string
 	RequestUser     string
+	FromUser        string
+	SrcIP           string
+	DstIP           string
 	Directory       string
 	Endpoints       map[Endpoint]struct{} // all endpoints (for fast lookup)
 	CallerEndpoints map[Endpoint]struct{} // endpoints from SDP in requests (INVITE)
@@ -69,10 +72,13 @@ func isIn(set map[Endpoint]struct{}, ep Endpoint) bool {
 }
 
 // newCall creates a new Call with initialized maps.
-func newCall(callID, requestUser, directory string) *Call {
+func newCall(callID, requestUser, fromUser, srcIP, dstIP, directory string) *Call {
 	return &Call{
 		CallID:          callID,
 		RequestUser:     requestUser,
+		FromUser:        fromUser,
+		SrcIP:           srcIP,
+		DstIP:           dstIP,
 		Directory:       directory,
 		Endpoints:       make(map[Endpoint]struct{}),
 		CallerEndpoints: make(map[Endpoint]struct{}),

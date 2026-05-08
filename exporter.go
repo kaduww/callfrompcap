@@ -8,7 +8,7 @@ import (
 	"strconv"
 )
 
-// writeCSV writes index.csv with columns: call_id, request_user, final_code, final_reason, duration, directory.
+// writeCSV writes index.csv with columns: call_id, from_user, request_user, final_code, final_reason, duration, directory.
 // codeFilter: set of allowed final SIP codes (empty = include all calls).
 // Returns the path to the written file and the number of rows written.
 func writeCSV(calls map[string]*Call, outputDir string, codeFilter map[int]struct{}) (string, int, error) {
@@ -23,7 +23,7 @@ func writeCSV(calls map[string]*Call, outputDir string, codeFilter map[int]struc
 	w := csv.NewWriter(f)
 	defer w.Flush()
 
-	if err := w.Write([]string{"call_id", "request_user", "final_code", "final_reason", "duration", "mos", "jitter_ms", "loss_pct", "media_flow", "directory"}); err != nil {
+	if err := w.Write([]string{"call_id", "from_user", "request_user", "src_ip", "dst_ip", "final_code", "final_reason", "duration", "mos", "jitter_ms", "loss_pct", "media_flow", "directory"}); err != nil {
 		return "", 0, fmt.Errorf("writing csv header: %w", err)
 	}
 
@@ -36,7 +36,10 @@ func writeCSV(calls map[string]*Call, outputDir string, codeFilter map[int]struc
 		}
 		row := []string{
 			call.CallID,
+			call.FromUser,
 			call.RequestUser,
+			call.SrcIP,
+			call.DstIP,
 			codeToString(call.FinalCode),
 			call.FinalReason,
 			callDuration(call),
