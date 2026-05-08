@@ -1,21 +1,21 @@
 # callfrompcap
 
-Ferramenta de linha de comando para analisar capturas de tráfego VoIP em formato PCAP. Para cada chamada encontrada, exporta o trace SIP, os streams RTP, o áudio decodificado e gera um índice CSV.
+Command-line tool for analyzing VoIP traffic captures in PCAP format. For each call found, it exports the SIP trace, RTP streams, decoded audio, and generates a CSV index.
 
-Escrita em Go — **binário único, sem dependências de runtime**. Lê o arquivo PCAP diretamente, sem precisar de tshark, Python ou qualquer biblioteca instalada no sistema. Testado com arquivos com ** mais de 40 GB** com uso de memória constante.
+Written in Go — **single binary, no runtime dependencies**. Reads the PCAP file directly without requiring tshark, Python, or any system-installed library. Tested with files **over 40 GB** with constant memory usage.
 
-## O que é gerado
+## What is generated
 
 ```
 output/
 ├── index.csv
 └── <call-id>/
-    ├── sip_trace.txt               ← diálogo SIP completo
-    ├── rtp_caller_a1b2c3d4.pcap    ← stream RTP do caller (abrível no Wireshark)
-    ├── rtp_caller_a1b2c3d4.wav     ← áudio do caller decodificado
-    ├── rtp_callee_e5f6a7b8.pcap    ← stream RTP do callee
-    ├── rtp_callee_e5f6a7b8.wav     ← áudio do callee decodificado
-    └── rtp_mixed.wav               ← streams mixados (somente com --mix-audio)
+    ├── sip_trace.txt               ← full SIP dialog
+    ├── rtp_caller_a1b2c3d4.pcap    ← caller RTP stream (openable in Wireshark)
+    ├── rtp_caller_a1b2c3d4.wav     ← decoded caller audio
+    ├── rtp_callee_e5f6a7b8.pcap    ← callee RTP stream
+    ├── rtp_callee_e5f6a7b8.wav     ← decoded callee audio
+    └── rtp_mixed.wav               ← mixed streams (only with --mix-audio)
 ```
 
 **`index.csv`**
@@ -26,55 +26,55 @@ def-456@pbx,1002,486,Busy Here,,,,,,/output/def-456_pbx
 ghi-789@pbx,1003,200,OK,37,3.71,8.43,1.20,caller-only,/output/ghi-789_pbx
 ```
 
-| Coluna | Descrição |
+| Column | Description |
 |---|---|
-| `call_id` | Call-ID SIP |
-| `request_user` | Usuário do Request-URI do INVITE (número discado) |
-| `final_code` | Último código de resposta final SIP (≥ 200) |
-| `final_reason` | Reason phrase do código final |
-| `duration` | Duração em segundos (de 200 OK ao INVITE até resposta ao BYE); vazio se a chamada não foi atendida |
-| `mos` | MOS mínimo entre os streams (E-model simplificado, mesma fórmula do Wireshark); vazio se sem RTP |
-| `jitter_ms` | Jitter médio em ms (RFC 3550); vazio se sem RTP |
-| `loss_pct` | Perda de pacotes RTP média em %; vazio se sem RTP |
-| `media_flow` | Direção do fluxo de mídia: `both`, `caller-only`, `callee-only`, ou vazio se sem RTP |
-| `directory` | Caminho absoluto do diretório da chamada |
+| `call_id` | SIP Call-ID |
+| `request_user` | User part of the INVITE Request-URI (dialed number) |
+| `final_code` | Last final SIP response code (≥ 200) |
+| `final_reason` | Reason phrase of the final code |
+| `duration` | Duration in seconds (from 200 OK to INVITE until response to BYE); empty if the call was not answered |
+| `mos` | Minimum MOS across streams (simplified E-model, same formula as Wireshark); empty if no RTP |
+| `jitter_ms` | Average jitter in ms (RFC 3550); empty if no RTP |
+| `loss_pct` | Average RTP packet loss in %; empty if no RTP |
+| `media_flow` | Media flow direction: `both`, `caller-only`, `callee-only`, or empty if no RTP |
+| `directory` | Absolute path to the call directory |
 
-## Requisitos
+## Requirements
 
-| Dependência | Obrigatório | Finalidade |
+| Dependency | Required | Purpose |
 |---|---|---|
-| nenhuma | — | análise SIP + RTP + G.711 funcionam sem nada instalado |
-| `ffmpeg` | opcional | decodificação de G.729 e G.722 para WAV; mixagem com `--mix-audio` |
+| none | — | SIP + RTP + G.711 analysis work with nothing installed |
+| `ffmpeg` | optional | G.729 and G.722 decoding to WAV; mixing with `--mix-audio` |
 
-> **Formato suportado:** `.pcap` (captura com link type Ethernet, Linux cooked ou raw IPv4). Arquivos `.pcapng` precisam ser convertidos antes: `tshark -r entrada.pcapng -w saida.pcap`
+> **Supported format:** `.pcap` (capture with link type Ethernet, Linux cooked, or raw IPv4). `.pcapng` files must be converted first: `tshark -r input.pcapng -w output.pcap`
 
-## Instalação
+## Installation
 
-### Compilar a partir do código-fonte
+### Build from source
 
-Requer [Go 1.22+](https://go.dev/dl/).
+Requires [Go 1.22+](https://go.dev/dl/).
 
 ```bash
-git clone <repositorio>
+git clone <repository>
 cd callfrompcap
 go build -o callfrompcap .
 ```
 
-### Compilar binário estático (Linux)
+### Build static binary (Linux)
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o callfrompcap .
 ```
 
-O binário resultante funciona em qualquer Linux x86-64 sem nenhuma lib instalada.
+The resulting binary works on any x86-64 Linux with no libraries installed.
 
-### Cross-compile para Windows (a partir de macOS/Linux)
+### Cross-compile for Windows (from macOS/Linux)
 
 ```bash
 GOOS=windows GOARCH=amd64 go build -o callfrompcap.exe .
 ```
 
-### ffmpeg (opcional — somente para G.729 / G.722)
+### ffmpeg (optional — only for G.729 / G.722)
 
 ```bash
 # macOS
@@ -91,193 +91,193 @@ sudo dnf install ffmpeg
 winget install Gyan.FFmpeg
 ```
 
-## Uso
+## Usage
 
 ```bash
-# Análise completa (SIP + RTP + WAV)
-./callfrompcap captura.pcap -o ./output
+# Full analysis (SIP + RTP + WAV)
+./callfrompcap capture.pcap -o ./output
 
-# Múltiplos arquivos (captura fracionada pelo tcpdump)
-./callfrompcap captura001.pcap captura002.pcap captura003.pcap -o ./output
+# Multiple files (capture split by tcpdump)
+./callfrompcap capture001.pcap capture002.pcap capture003.pcap -o ./output
 
-# Glob — todos os .pcap de um diretório
-./callfrompcap /capturas/*.pcap -o ./output
+# Glob — all .pcap files in a directory
+./callfrompcap /captures/*.pcap -o ./output
 
-# Somente traces SIP (mais rápido, sem extrair RTP)
-./callfrompcap captura.pcap -o ./output --sip-only
+# SIP traces only (faster, no RTP extraction)
+./callfrompcap capture.pcap -o ./output --sip-only
 
-# Somente chamadas INVITE com resposta 200
-./callfrompcap captura.pcap -o ./output --method INVITE --sip-code 200
+# Only INVITE calls with 200 response
+./callfrompcap capture.pcap -o ./output --method INVITE --sip-code 200
 
-# Chamadas que falharam por ocupado ou sem resposta
-./callfrompcap captura.pcap -o ./output --method INVITE --sip-code 486,480,408
+# Calls that failed due to busy or no answer
+./callfrompcap capture.pcap -o ./output --method INVITE --sip-code 486,480,408
 
-# Análise completa com áudio mixado por chamada
-./callfrompcap captura.pcap -o ./output --mix-audio
+# Full analysis with mixed audio per call
+./callfrompcap capture.pcap -o ./output --mix-audio
 ```
 
-### Opções
+### Options
 
-| Argumento | Padrão | Descrição |
+| Argument | Default | Description |
 |---|---|---|
-| `pcap` | — | Um ou mais arquivos `.pcap`, ou glob (`*.pcap`) |
-| `-o`, `--output` | `./output` | Diretório de saída |
-| `--sip-only` | — | Extrai apenas SIP, ignora RTP |
-| `--two-pass` | — | Lê o arquivo duas vezes (SIP depois RTP) |
-| `--method` | todas | Métodos SIP iniciais a incluir, separados por vírgula |
-| `--sip-code` | todos | Códigos de resposta final a incluir no CSV, separados por vírgula |
-| `--mix-audio` | — | Mixa todos os streams WAV de cada chamada em `rtp_mixed.wav` (requer ffmpeg) |
-| `--quiet` | — | Suprime eventos por linha; exibe somente a barra de progresso |
+| `pcap` | — | One or more `.pcap` files, or glob (`*.pcap`) |
+| `-o`, `--output` | `./output` | Output directory |
+| `--sip-only` | — | Extract SIP only, skip RTP |
+| `--two-pass` | — | Read the file twice (SIP then RTP) |
+| `--method` | all | Initial SIP methods to include, comma-separated |
+| `--sip-code` | all | Final response codes to include in CSV, comma-separated |
+| `--mix-audio` | — | Mix all WAV streams of each call into `rtp_mixed.wav` (requires ffmpeg) |
+| `--quiet` | — | Suppress per-event output; show only the progress bar |
 
 ### `--method`
 
-Filtra quais diálogos são processados pelo método da **primeira requisição** do Call-ID.
+Filters which dialogs are processed based on the **first request method** of the Call-ID.
 
 ```bash
---method INVITE            # somente chamadas de voz
---method REGISTER          # somente registros
---method INVITE,SUBSCRIBE  # chamadas e subscriptions
+--method INVITE            # voice calls only
+--method REGISTER          # registrations only
+--method INVITE,SUBSCRIBE  # calls and subscriptions
 ```
 
-Valores case-insensitive. Padrão: todos os métodos.
+Values are case-insensitive. Default: all methods.
 
 ### `--sip-code`
 
-Filtra quais linhas entram no `index.csv` pelo **último código de resposta final** (≥ 200) visto para cada chamada. Os diretórios e `sip_trace.txt` são gerados normalmente; só a linha do CSV é omitida.
+Filters which rows appear in `index.csv` based on the **last final response code** (≥ 200) seen for each call. Directories and `sip_trace.txt` are always created; only CSV rows are filtered.
 
 ```bash
---sip-code 200             # somente chamadas completadas
---sip-code 200,486         # completadas ou ocupado
---sip-code 404,480,486,503 # vários tipos de falha
+--sip-code 200             # completed calls only
+--sip-code 200,486         # completed or busy
+--sip-code 404,480,486,503 # various failure types
 ```
 
-Chamadas sem resposta final aparecem com `final_code` vazio; `--sip-code` as exclui do CSV.
+Calls with no final response appear with an empty `final_code`; `--sip-code` excludes them from the CSV.
 
 ### `--mix-audio`
 
-Após decodificar todos os streams, mixa os arquivos `rtp_*.wav` de cada chamada em um único `rtp_mixed.wav` usando `ffmpeg amix`. Útil para ouvir a conversa completa sem precisar abrir os dois lados separadamente.
+After decoding all streams, mixes the `rtp_*.wav` files of each call into a single `rtp_mixed.wav` using `ffmpeg amix`. Useful for listening to the full conversation without opening both sides separately.
 
 ```bash
-./callfrompcap captura.pcap -o ./output --mix-audio
+./callfrompcap capture.pcap -o ./output --mix-audio
 ```
 
-- Requer `ffmpeg` instalado no PATH
-- Sem efeito se a chamada tiver menos de dois streams WAV
-- Os arquivos individuais (`rtp_a1b2c3d4.wav`, etc.) são mantidos
-- Não compatível com `--sip-only` (nenhum WAV é gerado nesse modo)
+- Requires `ffmpeg` installed in PATH
+- No effect if the call has fewer than two WAV streams
+- Individual files (`rtp_a1b2c3d4.wav`, etc.) are preserved
+- Not compatible with `--sip-only` (no WAV files are generated in that mode)
 
-### Modos de operação
+### Operation modes
 
-#### Passe único (padrão)
+#### Single-pass (default)
 
-Lê o arquivo **uma vez**. Processa SIP e RTP na ordem de chegada.
+Reads the file **once**. Processes SIP and RTP in arrival order.
 
 ```
-arquivo.pcap → leitura direta em Go
-    ├─ pacote SIP → parse (Call-ID, SDP, rtpmap) → sip_trace.txt
-    └─ pacote RTP → roteamento por mapa de endpoints → .pcap + .wav
+file.pcap → direct read in Go
+    ├─ SIP packet → parse (Call-ID, SDP, rtpmap) → sip_trace.txt
+    └─ RTP packet → routing via endpoint map → .pcap + .wav
 ```
 
-#### Dois-passes (`--two-pass`)
+#### Two-pass (`--two-pass`)
 
-Lê o arquivo **duas vezes**: primeiro extrai todos os SIPs para montar o mapa de endpoints, depois processa o RTP. Útil quando a captura começa no meio de chamadas ativas.
+Reads the file **twice**: first extracts all SIP to build the endpoint map, then processes RTP. Useful when the capture starts in the middle of active calls.
 
-#### Somente SIP (`--sip-only`)
+#### SIP only (`--sip-only`)
 
-Lê o arquivo uma vez ignorando pacotes RTP. Ideal para inspecionar sinalização rapidamente.
+Reads the file once ignoring RTP packets. Ideal for quickly inspecting signaling.
 
-#### Comparativo
+#### Comparison
 
-| Modo | Leituras | Gera RTP/WAV | Quando usar |
+| Mode | Reads | Generates RTP/WAV | When to use |
 |---|---|---|---|
-| padrão | 1× | sim | uso geral |
-| `--two-pass` | 2× | sim | captura iniciada mid-call |
-| `--sip-only` | 1× | não | inspecionar sinalização |
+| default | 1× | yes | general use |
+| `--two-pass` | 2× | yes | capture started mid-call |
+| `--sip-only` | 1× | no | inspect signaling |
 
-## Múltiplos arquivos (captura fracionada)
+## Multiple files (split capture)
 
-O tcpdump com `-C` ou `-G` divide a captura em vários arquivos menores. A ferramenta os processa como se fossem um único arquivo — o contexto de chamadas (Call-ID, endpoints SDP, streams RTP) é mantido entre arquivos.
+tcpdump with `-C` or `-G` splits the capture into multiple smaller files. The tool processes them as if they were a single file — call context (Call-ID, SDP endpoints, RTP streams) is maintained across files.
 
 ```bash
-# tcpdump gera: captura001.pcap, captura002.pcap, ...
-./callfrompcap /capturas/*.pcap -o ./output
+# tcpdump generates: capture001.pcap, capture002.pcap, ...
+./callfrompcap /captures/*.pcap -o ./output
 ```
 
-Os arquivos são ordenados alfabeticamente antes do processamento. O padrão de nome gerado pelo tcpdump (`capturaNNN.pcap`) já garante a ordem cronológica correta com ordenação lexicográfica.
+Files are sorted alphabetically before processing. The naming pattern generated by tcpdump (`captureNNN.pcap`) already guarantees correct chronological order with lexicographic sorting.
 
-Em `--two-pass`, todos os arquivos são lidos duas vezes: primeiro para extrair o SIP e construir o mapa de endpoints, depois para extrair o RTP.
+With `--two-pass`, all files are read twice: first to extract SIP and build the endpoint map, then to extract RTP.
 
-## Capturas grandes (> 1 GB)
+## Large captures (> 1 GB)
 
-Em capturas com muitas chamadas simultâneas, o limite padrão de file descriptors pode ser insuficiente.
+On captures with many simultaneous calls, the default file descriptor limit may be insufficient.
 
 **macOS / Linux:**
 ```bash
 ulimit -n 65536
-./callfrompcap captura.pcap -o ./output
+./callfrompcap capture.pcap -o ./output
 ```
 
-**Windows:** não tem limite de file descriptors por processo; nenhuma configuração necessária.
+**Windows:** has no per-process file descriptor limit; no configuration needed.
 
-### Estimativa de RAM
+### RAM estimate
 
-| Chamadas no PCAP | RAM necessária |
+| Calls in PCAP | RAM required |
 |---|---|
-| até 1.000 | < 100 MB |
-| 1.000 – 10.000 | ~200 MB |
-| acima de 10.000 | ~500 MB |
+| up to 1,000 | < 100 MB |
+| 1,000 – 10,000 | ~200 MB |
+| above 10,000 | ~500 MB |
 
-O tamanho do arquivo (GB) **não afeta** o consumo de memória — o processamento é inteiramente em streaming, um pacote por vez.
+File size (GB) **does not affect** memory usage — processing is entirely streaming, one packet at a time.
 
-## Como funciona
+## How it works
 
-O arquivo nunca é carregado em memória. O `PcapReader` lê um pacote por vez com buffer de 1 MB; para cada frame é feito o parse manual do cabeçalho Ethernet → IP → UDP sem nenhuma biblioteca externa.
+The file is never loaded into memory. `PcapReader` reads one packet at a time with a 1 MB buffer; for each frame, manual parsing of the Ethernet → IP → UDP headers is done with no external library.
 
-### Passe único (padrão)
+### Single-pass (default)
 
 ```
-arquivo.pcap
+file.pcap
     │
     └─ PcapReader.Next() → parseUDP()
                 │
                 ├─ payload[0] & 0xC0 == 0x80?  →  RTP v2
-                │                                   ├─ lookup no mapa de endpoints
-                │                                   ├─ identifica caller / callee pelo SDP
-                │                                   ├─ grava rtp_<role>_<ssrc>.pcap
-                │                                   ├─ decodifica → rtp_<role>_<ssrc>.wav
-                │                                   │  (G.711 nativo; G.729/G.722 via ffmpeg)
-                │                                   └─ acumula jitter (RFC 3550) + seq loss
+                │                                   ├─ lookup in endpoint map
+                │                                   ├─ identify caller / callee from SDP
+                │                                   ├─ write rtp_<role>_<ssrc>.pcap
+                │                                   ├─ decode → rtp_<role>_<ssrc>.wav
+                │                                   │  (G.711 natively; G.729/G.722 via ffmpeg)
+                │                                   └─ accumulate jitter (RFC 3550) + seq loss
                 │
                 └─ payload[0] printable ASCII?  →  SIP
-                                                    ├─ parse (Call-ID, CSeq, método, SDP, rtpmap)
-                                                    ├─ atualiza mapa IP:porta → chamada
-                                                    ├─ rastreia código de resposta final
-                                                    ├─ registra ConnectedAt (200 OK INVITE)
-                                                    ├─ registra DisconnectedAt (resp. BYE)
-                                                    └─ grava sip_trace.txt
+                                                    ├─ parse (Call-ID, CSeq, method, SDP, rtpmap)
+                                                    ├─ update IP:port → call map
+                                                    ├─ track final response code
+                                                    ├─ record ConnectedAt (200 OK INVITE)
+                                                    ├─ record DisconnectedAt (BYE response)
+                                                    └─ write sip_trace.txt
 ```
 
-### Dois-passes (`--two-pass`)
+### Two-pass (`--two-pass`)
 
 ```
-arquivo.pcap
-    ├─ 1ª leitura → somente SIP → constrói mapa de endpoints
-    └─ 2ª leitura → somente RTP → roteia pelo mapa → .pcap e .wav
+file.pcap
+    ├─ 1st read → SIP only → build endpoint map
+    └─ 2nd read → RTP only → route via map → .pcap and .wav
 ```
 
-## Estrutura do código
+## Code structure
 
-| Arquivo | Responsabilidade |
+| File | Responsibility |
 |---|---|
-| `main.go` | CLI: flags, validação, roteia para os três modos |
-| `analyzer.go` | Passe único: lê o arquivo uma vez, processa SIP e RTP |
-| `pcap.go` | `PcapReader` + `PcapWriter` — leitura e escrita de `.pcap` puro Go |
-| `parse.go` | `parseUDP()` — extrai IP/UDP dos bytes brutos do frame |
-| `sipparser.go` | `parseSIP()` → `SIPInfo` (Call-ID, CSeq, método, código, SDP, rtpmap) |
+| `main.go` | CLI: flags, validation, routes to the three modes |
+| `analyzer.go` | Single-pass: reads file once, processes SIP and RTP |
+| `pcap.go` | `PcapReader` + `PcapWriter` — pure Go PCAP reading and writing |
+| `parse.go` | `parseUDP()` — extracts IP/UDP from raw frame bytes |
+| `sipparser.go` | `parseSIP()` → `SIPInfo` (Call-ID, CSeq, method, code, SDP, rtpmap) |
 | `sipextractor.go` | `processSIPPkt()`, `extractCalls()`, `_SipFileCache` (LRU 500 handles) |
-| `rtpextractor.go` | `processRTPPkt()`, `extractRTP()` — roteamento, escrita e coleta de métricas por SSRC |
-| `rtpstats.go` | `rtpStreamState` — jitter RFC 3550, perda de pacotes, MOS (E-model Wireshark) |
-| `audio.go` | Tabelas G.711, `WavWriter`, `FfmpegWriter`, `makeWriter()`, `mixCallsAudio()` |
-| `exporter.go` | `writeCSV()` — filtro por `--sip-code`, cálculo de duração e métricas RTP |
+| `rtpextractor.go` | `processRTPPkt()`, `extractRTP()` — routing, writing, and per-SSRC metrics |
+| `rtpstats.go` | `rtpStreamState` — RFC 3550 jitter, packet loss, MOS (Wireshark E-model) |
+| `audio.go` | G.711 tables, `WavWriter`, `FfmpegWriter`, `makeWriter()`, `mixCallsAudio()` |
+| `exporter.go` | `writeCSV()` — `--sip-code` filter, duration and RTP metrics calculation |
 | `model.go` | `Call`, `Endpoint`, `CodecInfo`, `rtpKey` |
-| `progress.go` | Status ao vivo com percentual de progresso (linha `\r` atualizada a cada 2 s) |
+| `progress.go` | Live status with percentage progress (`\r` line updated every 2s) |
