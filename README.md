@@ -10,20 +10,34 @@ Escrita em Go — **binário único, sem dependências de runtime**. Lê o arqui
 output/
 ├── index.csv
 └── <call-id>/
-    ├── sip_trace.txt          ← diálogo SIP completo
-    ├── rtp_a1b2c3d4.pcap      ← stream RTP por SSRC (abrível no Wireshark)
-    ├── rtp_a1b2c3d4.wav       ← áudio decodificado (G.711 PCMU / PCMA)
-    ├── rtp_e5f6a7b8.pcap
-    ├── rtp_e5f6a7b8.wav
-    └── rtp_mixed.wav          ← todos os streams mixados (somente com --mix-audio)
+    ├── sip_trace.txt               ← diálogo SIP completo
+    ├── rtp_caller_a1b2c3d4.pcap    ← stream RTP do caller (abrível no Wireshark)
+    ├── rtp_caller_a1b2c3d4.wav     ← áudio do caller decodificado
+    ├── rtp_callee_e5f6a7b8.pcap    ← stream RTP do callee
+    ├── rtp_callee_e5f6a7b8.wav     ← áudio do callee decodificado
+    └── rtp_mixed.wav               ← streams mixados (somente com --mix-audio)
 ```
 
 **`index.csv`**
 ```
-call_id,request_user,final_code,final_reason,directory
-abc-123@pbx,1001,200,OK,/output/abc-123_pbx
-def-456@pbx,1002,486,Busy Here,/output/def-456_pbx
+call_id,request_user,final_code,final_reason,duration,mos,jitter_ms,loss_pct,media_flow,directory
+abc-123@pbx,1001,200,OK,142,4.32,1.25,0.00,both,/output/abc-123_pbx
+def-456@pbx,1002,486,Busy Here,,,,,,/output/def-456_pbx
+ghi-789@pbx,1003,200,OK,37,3.71,8.43,1.20,caller-only,/output/ghi-789_pbx
 ```
+
+| Coluna | Descrição |
+|---|---|
+| `call_id` | Call-ID SIP |
+| `request_user` | Usuário do Request-URI do INVITE (número discado) |
+| `final_code` | Último código de resposta final SIP (≥ 200) |
+| `final_reason` | Reason phrase do código final |
+| `duration` | Duração em segundos (de 200 OK ao INVITE até resposta ao BYE); vazio se a chamada não foi atendida |
+| `mos` | MOS mínimo entre os streams (E-model simplificado, mesma fórmula do Wireshark); vazio se sem RTP |
+| `jitter_ms` | Jitter médio em ms (RFC 3550); vazio se sem RTP |
+| `loss_pct` | Perda de pacotes RTP média em %; vazio se sem RTP |
+| `media_flow` | Direção do fluxo de mídia: `both`, `caller-only`, `callee-only`, ou vazio se sem RTP |
+| `directory` | Caminho absoluto do diretório da chamada |
 
 ## Requisitos
 
@@ -228,14 +242,18 @@ arquivo.pcap
                 │
                 ├─ payload[0] & 0xC0 == 0x80?  →  RTP v2
                 │                                   ├─ lookup no mapa de endpoints
-                │                                   ├─ grava rtp_<ssrc>.pcap
-                │                                   └─ decodifica → rtp_<ssrc>.wav
-                │                                      (G.711 nativo; G.729/G.722 via ffmpeg)
+                │                                   ├─ identifica caller / callee pelo SDP
+                │                                   ├─ grava rtp_<role>_<ssrc>.pcap
+                │                                   ├─ decodifica → rtp_<role>_<ssrc>.wav
+                │                                   │  (G.711 nativo; G.729/G.722 via ffmpeg)
+                │                                   └─ acumula jitter (RFC 3550) + seq loss
                 │
                 └─ payload[0] printable ASCII?  →  SIP
-                                                    ├─ parse (Call-ID, método, SDP, rtpmap)
+                                                    ├─ parse (Call-ID, CSeq, método, SDP, rtpmap)
                                                     ├─ atualiza mapa IP:porta → chamada
                                                     ├─ rastreia código de resposta final
+                                                    ├─ registra ConnectedAt (200 OK INVITE)
+                                                    ├─ registra DisconnectedAt (resp. BYE)
                                                     └─ grava sip_trace.txt
 ```
 
@@ -255,10 +273,11 @@ arquivo.pcap
 | `analyzer.go` | Passe único: lê o arquivo uma vez, processa SIP e RTP |
 | `pcap.go` | `PcapReader` + `PcapWriter` — leitura e escrita de `.pcap` puro Go |
 | `parse.go` | `parseUDP()` — extrai IP/UDP dos bytes brutos do frame |
-| `sipparser.go` | `parseSIP()` → `SIPInfo` (Call-ID, método, código, SDP, rtpmap) |
+| `sipparser.go` | `parseSIP()` → `SIPInfo` (Call-ID, CSeq, método, código, SDP, rtpmap) |
 | `sipextractor.go` | `processSIPPkt()`, `extractCalls()`, `_SipFileCache` (LRU 500 handles) |
-| `rtpextractor.go` | `processRTPPkt()`, `extractRTP()`, `PcapWriter` por SSRC |
+| `rtpextractor.go` | `processRTPPkt()`, `extractRTP()` — roteamento, escrita e coleta de métricas por SSRC |
+| `rtpstats.go` | `rtpStreamState` — jitter RFC 3550, perda de pacotes, MOS (E-model Wireshark) |
 | `audio.go` | Tabelas G.711, `WavWriter`, `FfmpegWriter`, `makeWriter()`, `mixCallsAudio()` |
-| `exporter.go` | `writeCSV()` com filtro por `--sip-code` |
-| `model.go` | `Call`, `Endpoint`, `CodecInfo` |
-| `progress.go` | Status ao vivo (linha `\r` atualizada a cada 2 s) |
+| `exporter.go` | `writeCSV()` — filtro por `--sip-code`, cálculo de duração e métricas RTP |
+| `model.go` | `Call`, `Endpoint`, `CodecInfo`, `rtpKey` |
+| `progress.go` | Status ao vivo com percentual de progresso (linha `\r` atualizada a cada 2 s) |

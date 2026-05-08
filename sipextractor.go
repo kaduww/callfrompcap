@@ -169,6 +169,19 @@ func processSIPPkt(
 		call.FinalReason = info.StatusReason
 	}
 
+	// Track call duration anchors
+	switch {
+	case info.StatusCode == 200 && info.CSeqMethod == "INVITE" && call.ConnectedAt == 0:
+		// First 200 OK to INVITE = call established
+		call.ConnectedAt = pkt.timestamp
+	case info.Method == "BYE":
+		// BYE request: tentative disconnect time (overwritten if response arrives)
+		call.DisconnectedAt = pkt.timestamp
+	case info.StatusCode >= 200 && info.CSeqMethod == "BYE":
+		// Final response to BYE: authoritative disconnect time
+		call.DisconnectedAt = pkt.timestamp
+	}
+
 	// Format SIP trace entry
 	separator := strings.Repeat("=", 72)
 	ts := fmtTimestamp(pkt.timestamp)

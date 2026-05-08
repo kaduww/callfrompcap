@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-// processRTPPkt processes one RTP packet: routes to call, writes pcap and wav.
+// processRTPPkt processes one RTP packet: routes to call, writes pcap/wav, updates stats.
 func processRTPPkt(
 	ts float64,
 	srcIP, dstIP string,
@@ -19,6 +19,7 @@ func processRTPPkt(
 	endpointMap map[Endpoint]*Call,
 	pcapWriters map[rtpKey]*PcapWriter,
 	wavWriters map[rtpKey]audioWriter,
+	stateMap map[rtpKey]*rtpStreamState,
 	outputDir string,
 ) error {
 	// Look up call via src or dst endpoint
@@ -50,10 +51,8 @@ func processRTPPkt(
 		case isIn(call.CalleeEndpoints, srcEp):
 			role = "callee"
 		case isIn(call.CallerEndpoints, dstEp):
-			// dst is caller's receive addr → src is callee sending to caller
 			role = "callee"
 		case isIn(call.CalleeEndpoints, dstEp):
-			// dst is callee's receive addr → src is caller sending to callee
 			role = "caller"
 		}
 
@@ -75,6 +74,21 @@ func processRTPPkt(
 			wavWriters[key] = aw
 		}
 
+		// Create stats tracker for this SSRC stream
+		clockRate := 8000 // default; overridden by dynamic rtpmap if present
+		if codec, ok := call.RTPMap[rtpPayloadType(udpPayload)]; ok && codec.ClockRate > 0 {
+			clockRate = codec.ClockRate
+		}
+		stateMap[key] = newRTPStreamState(call, clockRate)
+
+		// Track media flow direction
+		switch role {
+		case "caller":
+			call.HadCallerRTP = true
+		case "callee":
+			call.HadCalleeRTP = true
+		}
+
 		logEvent("[rtp]   %s  %s  ssrc=%08x", call.CallID, role, ssrc)
 	}
 
@@ -87,6 +101,11 @@ func processRTPPkt(
 	if aw, ok := wavWriters[key]; ok {
 		aw.writePacket(udpPayload)
 	}
+
+	// Update per-stream metrics (seq bytes 2-3, RTP timestamp bytes 4-7)
+	seq := binary.BigEndian.Uint16(udpPayload[2:4])
+	rtpTS := binary.BigEndian.Uint32(udpPayload[4:8])
+	stateMap[key].update(seq, rtpTS, ts)
 
 	return nil
 }
@@ -102,6 +121,7 @@ func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call) error {
 
 	pcapWriters := make(map[rtpKey]*PcapWriter)
 	wavWriters := make(map[rtpKey]audioWriter)
+	stateMap := make(map[rtpKey]*rtpStreamState)
 	prog := newProgress(totalBytes)
 
 	defer func() {
@@ -110,6 +130,9 @@ func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call) error {
 		}
 		for _, aw := range wavWriters {
 			aw.close()
+		}
+		for _, s := range stateMap {
+			s.finalize()
 		}
 	}()
 
@@ -151,7 +174,7 @@ func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call) error {
 			if err := processRTPPkt(
 				ts, srcIP, dstIP, srcPort, dstPort,
 				data, udpPayload, datalink,
-				endpointMap, pcapWriters, wavWriters, "",
+				endpointMap, pcapWriters, wavWriters, stateMap, "",
 			); err != nil {
 				logEvent("[warn]  %v", err)
 			}

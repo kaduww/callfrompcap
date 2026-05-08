@@ -11,6 +11,7 @@ type SIPInfo struct {
 	Method       string // request method (INVITE, REGISTER, …); empty for responses
 	StatusCode   int    // response status code (100–699); 0 for requests
 	StatusReason string // response reason phrase (e.g. "OK", "Busy Here"); empty for requests
+	CSeqMethod   string // method from CSeq header (tells which request a response belongs to)
 	RequestUser  string
 	SDPEndpoints []Endpoint
 	RTPMap       map[int]CodecInfo
@@ -65,6 +66,11 @@ func parseSIP(payload []byte) *SIPInfo {
 		if key == "call-id" || key == "i" {
 			if info.CallID == "" {
 				info.CallID = val
+			}
+		} else if key == "cseq" {
+			// CSeq: <seq-number> <method>
+			if f := strings.Fields(val); len(f) >= 2 {
+				info.CSeqMethod = strings.ToUpper(f[1])
 			}
 		}
 	}

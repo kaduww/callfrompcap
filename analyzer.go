@@ -29,6 +29,7 @@ func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struc
 	rejectedIDs := make(map[string]struct{})
 	pcapWriters := make(map[rtpKey]*PcapWriter)
 	wavWriters := make(map[rtpKey]audioWriter)
+	stateMap := make(map[rtpKey]*rtpStreamState)
 	cache := newSipFileCache()
 	prog := newProgress(totalBytes)
 
@@ -39,6 +40,9 @@ func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struc
 		}
 		for _, aw := range wavWriters {
 			aw.close()
+		}
+		for _, s := range stateMap {
+			s.finalize()
 		}
 	}()
 
@@ -76,7 +80,7 @@ func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struc
 				if err := processRTPPkt(
 					ts, srcIP, dstIP, srcPort, dstPort,
 					data, udpPayload, datalink,
-					endpointMap, pcapWriters, wavWriters, outputDir,
+					endpointMap, pcapWriters, wavWriters, stateMap, outputDir,
 				); err != nil {
 					logEvent("[warn]  %v", err)
 				}
