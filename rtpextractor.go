@@ -21,6 +21,8 @@ func processRTPPkt(
 	wavWriters map[rtpKey]audioWriter,
 	stateMap map[rtpKey]*rtpStreamState,
 	outputDir string,
+	trimRing bool,
+	noRTPPcap bool,
 ) error {
 	// Look up call via src or dst endpoint
 	call := endpointMap[Endpoint{IP: srcIP, Port: srcPort}]
@@ -56,13 +58,17 @@ func processRTPPkt(
 			role = "caller"
 		}
 
-		// Create PCAP writer for this SSRC stream
-		pcapPath := fmt.Sprintf("%s/rtp_%s_%08x.pcap", call.Directory, role, ssrc)
-		pw, err := NewPcapWriter(pcapPath, datalink)
-		if err != nil {
-			return fmt.Errorf("creating pcap writer %s: %w", pcapPath, err)
+		// Create PCAP writer for this SSRC stream (nil when --no-rtp-pcap is set)
+		if !noRTPPcap {
+			pcapPath := fmt.Sprintf("%s/rtp_%s_%08x.pcap", call.Directory, role, ssrc)
+			pw, err := NewPcapWriter(pcapPath, datalink)
+			if err != nil {
+				return fmt.Errorf("creating pcap writer %s: %w", pcapPath, err)
+			}
+			pcapWriters[key] = pw
+		} else {
+			pcapWriters[key] = nil // mark SSRC as seen; no file created
 		}
-		pcapWriters[key] = pw
 
 		// Create audio writer for this SSRC stream
 		pt := rtpPayloadType(udpPayload)
@@ -71,6 +77,9 @@ func processRTPPkt(
 		if err != nil {
 			logEvent("[warn]  rtp_%s_%08x: %v", role, ssrc, err)
 		} else if aw != nil {
+			if trimRing && isG711Codec(pt, call.RTPMap) {
+				aw = newRingDetector(aw, call, pt, call.RTPMap, role, ssrc)
+			}
 			wavWriters[key] = aw
 		}
 
@@ -93,13 +102,15 @@ func processRTPPkt(
 	}
 
 	// Write raw packet to PCAP
-	if err := pcapWriters[key].Write(ts, rawPkt); err != nil {
-		return fmt.Errorf("writing rtp pcap: %w", err)
+	if pw := pcapWriters[key]; pw != nil {
+		if err := pw.Write(ts, rawPkt); err != nil {
+			return fmt.Errorf("writing rtp pcap: %w", err)
+		}
 	}
 
 	// Write UDP payload to audio writer
 	if aw, ok := wavWriters[key]; ok {
-		aw.writePacket(udpPayload)
+		aw.writePacket(ts, udpPayload)
 	}
 
 	// Update per-stream metrics (seq bytes 2-3, RTP timestamp bytes 4-7)
@@ -111,7 +122,7 @@ func processRTPPkt(
 }
 
 // extractRTP streams RTP packets from one or more PCAP files and writes per-SSRC files.
-func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call) error {
+func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call, trimRing, noRTPPcap bool) error {
 	var totalBytes int64
 	for _, f := range pcapFiles {
 		if fi, err := os.Stat(f); err == nil {
@@ -126,7 +137,9 @@ func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call) error {
 
 	defer func() {
 		for _, pw := range pcapWriters {
-			pw.Close()
+			if pw != nil {
+				pw.Close()
+			}
 		}
 		for _, aw := range wavWriters {
 			aw.close()
@@ -174,7 +187,7 @@ func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call) error {
 			if err := processRTPPkt(
 				ts, srcIP, dstIP, srcPort, dstPort,
 				data, udpPayload, datalink,
-				endpointMap, pcapWriters, wavWriters, stateMap, "",
+				endpointMap, pcapWriters, wavWriters, stateMap, "", trimRing, noRTPPcap,
 			); err != nil {
 				logEvent("[warn]  %v", err)
 			}

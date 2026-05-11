@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -233,7 +234,7 @@ func newFfmpegWriter(path, format string) (*FfmpegWriter, error) {
 
 // writePacket sends raw RTP audio payload bytes to ffmpeg stdin.
 // payload is the full RTP packet; the RTP header is stripped first.
-func (w *FfmpegWriter) writePacket(payload []byte) {
+func (w *FfmpegWriter) writePacket(_ float64, payload []byte) {
 	if w.dead {
 		return
 	}
@@ -256,18 +257,18 @@ func (w *FfmpegWriter) close() error {
 
 // audioWriter is the common interface for WavWriter and FfmpegWriter.
 type audioWriter interface {
-	writePacket([]byte)
+	writePacket(ts float64, payload []byte)
 	close() error
 }
 
 // wavWriterAdapter wraps WavWriter to satisfy audioWriter (adapts the extra args).
 type wavWriterAdapter struct {
-	w     *WavWriter
-	pt    int
+	w      *WavWriter
+	pt     int
 	rtpMap map[int]CodecInfo
 }
 
-func (a *wavWriterAdapter) writePacket(payload []byte) {
+func (a *wavWriterAdapter) writePacket(_ float64, payload []byte) {
 	a.w.writePacket(payload, a.pt, a.rtpMap)
 }
 
@@ -385,6 +386,216 @@ func mixCallAudio(dir string) (bool, error) {
 	cmd := exec.Command("ffmpeg", args...)
 	cmd.Stderr = io.Discard
 	return true, cmd.Run()
+}
+
+// Ring-tone detection constants.
+const (
+	rdSilenceRMS = 500.0 // RMS below this = silence (int16 scale, ~−42 dBFS)
+	rdMinOnSec   = 0.30  // min ring burst duration (s)
+	rdMaxOnSec   = 3.00  // max ring burst duration (s)
+	rdMinOffSec  = 0.80  // min silence between ring bursts (s)
+	rdMaxOffSec  = 7.00  // max silence between ring bursts (s)
+	rdMaxBufSec  = 30.0  // safety cap: flush buffer after this many seconds of early media
+)
+
+// rdFrame is one buffered RTP frame with its energy level for cadence analysis.
+type rdFrame struct {
+	ts      float64
+	payload []byte
+	energy  float64
+}
+
+// isG711Codec reports whether the payload type resolves to G.711 PCMU or PCMA
+// (either via static PT 0/8 or via a dynamic rtpmap entry).
+func isG711Codec(pt int, rtpMap map[int]CodecInfo) bool {
+	if pt == 0 || pt == 8 {
+		return true
+	}
+	if codec, ok := rtpMap[pt]; ok {
+		name := strings.ToUpper(codec.Name)
+		return name == "PCMU" || name == "PCMA"
+	}
+	return false
+}
+
+// calcEnergy returns the RMS energy of the audio in one G.711 RTP packet
+// (int16 scale). Returns 0 for non-G.711 codecs — ring detection is only
+// enabled for G.711 where decoded amplitude is comparable to the fixed
+// silence threshold.
+func calcEnergy(payload []byte, pt int, rtpMap map[int]CodecInfo) float64 {
+	audio := rtpAudioPayload(payload)
+	if len(audio) == 0 {
+		return 0
+	}
+	isUlaw := pt == 0
+	if pt != 0 && pt != 8 {
+		codec, ok := rtpMap[pt]
+		if !ok {
+			return 0
+		}
+		switch strings.ToUpper(codec.Name) {
+		case "PCMU":
+			isUlaw = true
+		case "PCMA":
+			isUlaw = false
+		default:
+			return 0
+		}
+	}
+	var sum int64
+	if isUlaw {
+		for _, b := range audio {
+			s := int64(ulawTable[b])
+			sum += s * s
+		}
+	} else {
+		for _, b := range audio {
+			s := int64(alawTable[b])
+			sum += s * s
+		}
+	}
+	return math.Sqrt(float64(sum) / float64(len(audio)))
+}
+
+// findRingEnd analyses buffered early-media frames and returns the index of the
+// first frame that is NOT part of a leading ring-tone sequence.
+// Returns 0 when no ring cadence is detected (caller should write all frames).
+func findRingEnd(frames []rdFrame) int {
+	if len(frames) < 5 {
+		return 0
+	}
+
+	type segment struct {
+		active   bool
+		startIdx int
+		endIdx   int
+	}
+	var segs []segment
+	cur := segment{active: frames[0].energy > rdSilenceRMS, startIdx: 0}
+	for i := 1; i < len(frames); i++ {
+		isActive := frames[i].energy > rdSilenceRMS
+		if isActive != cur.active {
+			cur.endIdx = i - 1
+			segs = append(segs, cur)
+			cur = segment{active: isActive, startIdx: i}
+		}
+	}
+	cur.endIdx = len(frames) - 1
+	segs = append(segs, cur)
+
+	// Estimate frame duration from the buffer span (handles G.711@20ms,
+	// G.722@10ms, etc.). The +frameDur term accounts for the last frame
+	// that the ts-difference alone would miss.
+	frameDur := 0.02
+	if len(frames) >= 2 {
+		if d := (frames[len(frames)-1].ts - frames[0].ts) / float64(len(frames)-1); d > 0 && d <= 0.5 {
+			frameDur = d
+		}
+	}
+	segDur := func(s segment) float64 {
+		return frames[s.endIdx].ts - frames[s.startIdx].ts + frameDur
+	}
+
+	// Allow an optional leading silence (stream captured during a ring-off period).
+	start := 0
+	if !segs[0].active && segDur(segs[0]) >= rdMinOffSec {
+		start = 1
+	}
+
+	ringEndIdx := -1
+	i := start
+	for i+1 < len(segs) {
+		on, off := segs[i], segs[i+1]
+		onDur, offDur := segDur(on), segDur(off)
+		if on.active &&
+			onDur >= rdMinOnSec && onDur <= rdMaxOnSec &&
+			!off.active &&
+			offDur >= rdMinOffSec && offDur <= rdMaxOffSec {
+			ringEndIdx = off.endIdx + 1
+			i += 2
+		} else {
+			break
+		}
+	}
+
+	// Consume a trailing active burst that matches ring duration (buffer may end mid-cycle).
+	if ringEndIdx >= 0 && i < len(segs) && segs[i].active {
+		if d := segDur(segs[i]); d >= rdMinOnSec && d <= rdMaxOnSec {
+			ringEndIdx = segs[i].endIdx + 1
+		}
+	}
+
+	if ringEndIdx <= 0 || ringEndIdx >= len(frames) {
+		return 0
+	}
+	return ringEndIdx
+}
+
+// RingDetector wraps an audioWriter, buffers early-media frames (before the call
+// is answered), detects ring-tone cadence, and suppresses those frames before
+// forwarding the rest to the underlying writer.
+type RingDetector struct {
+	inner  audioWriter
+	call   *Call
+	pt     int
+	rtpMap map[int]CodecInfo
+	role   string
+	ssrc   uint32
+	buf    []rdFrame
+	pass   bool // true = passthrough, no more buffering
+}
+
+func newRingDetector(inner audioWriter, call *Call, pt int, rtpMap map[int]CodecInfo, role string, ssrc uint32) *RingDetector {
+	return &RingDetector{inner: inner, call: call, pt: pt, rtpMap: rtpMap, role: role, ssrc: ssrc}
+}
+
+func (r *RingDetector) writePacket(ts float64, payload []byte) {
+	if r.pass {
+		r.inner.writePacket(ts, payload)
+		return
+	}
+
+	connectedAt := r.call.ConnectedAt
+	if connectedAt > 0 && ts >= connectedAt {
+		r.flushBuf()
+		r.pass = true
+		r.inner.writePacket(ts, payload)
+		return
+	}
+
+	energy := calcEnergy(payload, r.pt, r.rtpMap)
+	r.buf = append(r.buf, rdFrame{
+		ts:      ts,
+		payload: append([]byte(nil), payload...),
+		energy:  energy,
+	})
+
+	// Safety cap: flush unconditionally if buffer grows beyond rdMaxBufSec.
+	if len(r.buf) > 1 && r.buf[len(r.buf)-1].ts-r.buf[0].ts > rdMaxBufSec {
+		r.flushBuf()
+		r.pass = true
+	}
+}
+
+func (r *RingDetector) flushBuf() {
+	if len(r.buf) == 0 {
+		return
+	}
+	start := findRingEnd(r.buf)
+	if start > 0 {
+		trimmedSec := r.buf[start-1].ts - r.buf[0].ts
+		logEvent("[ring]  %s  %s ssrc=%08x  trimmed %d frames (~%.2fs)",
+			r.call.CallID, r.role, r.ssrc, start, trimmedSec)
+	}
+	for _, f := range r.buf[start:] {
+		r.inner.writePacket(f.ts, f.payload)
+	}
+	r.buf = nil
+}
+
+func (r *RingDetector) close() error {
+	r.flushBuf()
+	return r.inner.close()
 }
 
 // mixCallsAudio runs mixCallAudio for every call that has 2+ WAV streams.

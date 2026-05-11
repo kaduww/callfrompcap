@@ -33,6 +33,8 @@ func main() {
 	codeFlag   := flag.String("sip-code", "", "comma-separated final SIP response codes to include in CSV (e.g. 200,486); default: all")
 	verboseFlag  := flag.Bool("verbose", false, "print per-event output; hides the progress line")
 	mixAudioFlag := flag.Bool("mix-audio", false, "mix per-SSRC WAV files into a single rtp_mixed.wav per call (requires ffmpeg)")
+	trimRingFlag  := flag.Bool("trim-ring", false, "remove ring-tone bursts from the beginning of early-media audio streams")
+	noRTPPcapFlag := flag.Bool("no-rtp-pcap", false, "skip writing per-SSRC RTP PCAP files (keep WAV only)")
 
 	// Support long form --output as alias for -o
 	flag.StringVar(outputDir, "output", "./output", "output directory (long form)")
@@ -50,6 +52,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "                       examples: 200  |  200,486  |  404,480,486\n")
 		fmt.Fprintf(os.Stderr, "  --verbose            print per-event output; hides the progress line\n")
 		fmt.Fprintf(os.Stderr, "  --mix-audio          mix per-SSRC WAV files into rtp_mixed.wav per call (requires ffmpeg)\n")
+		fmt.Fprintf(os.Stderr, "  --trim-ring          remove ring-tone bursts from early-media audio streams\n")
+		fmt.Fprintf(os.Stderr, "  --no-rtp-pcap        skip per-SSRC RTP PCAP files (WAV only)\n")
 	}
 
 	flag.Parse()
@@ -136,7 +140,7 @@ func main() {
 		fmt.Printf("      %d call(s) found\n", len(calls))
 
 		fmt.Printf("[2/3] Extracting RTP streams from %d file(s) ...\n", nFiles)
-		if err := extractRTP(pcapFiles, endpointMap); err != nil {
+		if err := extractRTP(pcapFiles, endpointMap, *trimRingFlag, *noRTPPcapFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 			os.Exit(1)
 		}
@@ -158,7 +162,7 @@ func main() {
 	} else {
 		// Default: single-pass (reads files once each)
 		fmt.Printf("[1/2] Analyzing %d file(s)  →  %s  (single-pass SIP + RTP)\n", nFiles, out)
-		calls, err := analyze(pcapFiles, out, methodFilter)
+		calls, err := analyze(pcapFiles, out, methodFilter, *trimRingFlag, *noRTPPcapFlag)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 			os.Exit(1)

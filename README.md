@@ -117,6 +117,12 @@ winget install Gyan.FFmpeg
 
 # Full analysis with mixed audio per call
 ./callfrompcap capture.pcap -o ./output --mix-audio
+
+# Strip ring-tone from early-media WAVs (e.g. voicemail recordings)
+./callfrompcap capture.pcap -o ./output --trim-ring
+
+# WAV only — skip per-SSRC .pcap files
+./callfrompcap capture.pcap -o ./output --no-rtp-pcap
 ```
 
 ### Options
@@ -130,6 +136,8 @@ winget install Gyan.FFmpeg
 | `--method` | all | Initial SIP methods to include, comma-separated |
 | `--sip-code` | all | Final response codes to include in CSV, comma-separated |
 | `--mix-audio` | — | Mix all WAV streams of each call into `rtp_mixed.wav` (requires ffmpeg) |
+| `--trim-ring` | — | Detect and remove ring-tone bursts from early-media audio (G.711 only) |
+| `--no-rtp-pcap` | — | Skip per-SSRC RTP `.pcap` files (keep `.wav` only) |
 | `--verbose` | — | Print per-event output; hides the progress bar |
 
 ### `--method`
@@ -168,6 +176,31 @@ After decoding all streams, mixes the `rtp_*.wav` files of each call into a sing
 - No effect if the call has fewer than two WAV streams
 - Individual files (`rtp_a1b2c3d4.wav`, etc.) are preserved
 - Not compatible with `--sip-only` (no WAV files are generated in that mode)
+
+### `--trim-ring`
+
+Suppresses ring-tone (ringback) bursts that arrive as early media before the 200 OK. Useful when the callee is a voicemail box: the recording starts with several seconds of ringing before the greeting, and `--trim-ring` removes that prefix while preserving the greeting itself.
+
+```bash
+./callfrompcap capture.pcap -o ./output --trim-ring
+```
+
+How it works: while the call is not answered (`ConnectedAt == 0`), each RTP frame is buffered together with its RMS energy. When the 200 OK arrives — or when the stream is closed — the buffer is scanned for the characteristic ring-tone cadence (alternating ON bursts of 0.3–3 s with OFF gaps of 0.8–7 s, covering BR/US/EU patterns). Frames belonging to ring cycles are discarded; everything after the last ring-off is written to the WAV.
+
+- Applied only to G.711 (PCMU/PCMA) streams — other codecs are passed through untouched
+- No effect on calls without early media (RTP arrives after the 200 OK)
+- Safety cap: if more than 30 s of early media accumulates without a 200 OK, the buffer is analyzed and flushed
+- With `--verbose`, each trim is logged: `[ring] <Call-ID> <role> ssrc=<hex> trimmed N frames (~X.XXs)`
+
+### `--no-rtp-pcap`
+
+Skips creation of the per-SSRC `rtp_*.pcap` files; only the `.wav` files (plus the SIP trace and `index.csv`) are written. Useful when you only need the decoded audio and want to reduce disk usage.
+
+```bash
+./callfrompcap capture.pcap -o ./output --no-rtp-pcap
+```
+
+The PCAP writers are never created (not written then deleted), so this also saves I/O time on large captures.
 
 ### Operation modes
 
@@ -280,7 +313,7 @@ file.pcap
 | `sipextractor.go` | `processSIPPkt()`, `extractCalls()`, `_SipFileCache` (LRU 500 handles) |
 | `rtpextractor.go` | `processRTPPkt()`, `extractRTP()` — routing, writing, and per-SSRC metrics |
 | `rtpstats.go` | `rtpStreamState` — RFC 3550 jitter, packet loss, MOS (Wireshark E-model) |
-| `audio.go` | G.711 tables, `WavWriter`, `FfmpegWriter`, `makeWriter()`, `mixCallsAudio()` |
+| `audio.go` | G.711 tables, `WavWriter`, `FfmpegWriter`, `makeWriter()`, `mixCallsAudio()`, `RingDetector` (early-media ring-tone trim) |
 | `exporter.go` | `writeCSV()` — `--sip-code` filter, duration and RTP metrics calculation |
 | `model.go` | `Call`, `Endpoint`, `CodecInfo`, `rtpKey` |
 | `progress.go` | Live status with percentage progress (`\r` line updated every 2s) |

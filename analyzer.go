@@ -11,7 +11,7 @@ import (
 // processing both SIP and RTP packets while maintaining a shared call context.
 // methodFilter: set of uppercase SIP methods to accept (empty = accept all).
 // Returns the map of calls (call_id -> *Call).
-func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struct{}) (map[string]*Call, error) {
+func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struct{}, trimRing, noRTPPcap bool) (map[string]*Call, error) {
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating output directory: %w", err)
 	}
@@ -36,7 +36,9 @@ func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struc
 	defer func() {
 		cache.closeAll()
 		for _, pw := range pcapWriters {
-			pw.Close()
+			if pw != nil {
+				pw.Close()
+			}
 		}
 		for _, aw := range wavWriters {
 			aw.close()
@@ -80,7 +82,7 @@ func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struc
 				if err := processRTPPkt(
 					ts, srcIP, dstIP, srcPort, dstPort,
 					data, udpPayload, datalink,
-					endpointMap, pcapWriters, wavWriters, stateMap, outputDir,
+					endpointMap, pcapWriters, wavWriters, stateMap, outputDir, trimRing, noRTPPcap,
 				); err != nil {
 					logEvent("[warn]  %v", err)
 				}
