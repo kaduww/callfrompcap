@@ -8,6 +8,10 @@ import (
 	"path/filepath"
 )
 
+// byeGraceSeconds is how long after a call's BYE we still accept RTP packets
+// before refusing to create new streams for that call.
+const byeGraceSeconds = 1.0
+
 // processRTPPkt processes one RTP packet: routes to call, writes pcap/wav, updates stats.
 func processRTPPkt(
 	ts float64,
@@ -20,6 +24,7 @@ func processRTPPkt(
 	pcapWriters map[rtpKey]*PcapWriter,
 	wavWriters map[rtpKey]audioWriter,
 	stateMap map[rtpKey]*rtpStreamState,
+	closedStreams map[rtpKey]struct{},
 	outputDir string,
 	trimRing bool,
 	noRTPPcap bool,
@@ -41,7 +46,18 @@ func processRTPPkt(
 	ssrc := binary.BigEndian.Uint32(udpPayload[8:12])
 	key := rtpKey{callID: call.CallID, ssrc: ssrc}
 
-	if _, exists := pcapWriters[key]; !exists {
+	// Stream was already finalized (idle-evicted or call ended) — discard.
+	if _, closed := closedStreams[key]; closed {
+		return nil
+	}
+
+	if _, exists := stateMap[key]; !exists {
+		// Refuse new streams for a call whose BYE was already seen well in the past.
+		if call.DisconnectedAt > 0 && ts > call.DisconnectedAt+byeGraceSeconds {
+			closedStreams[key] = struct{}{}
+			return nil
+		}
+
 		// Determine caller/callee role by matching the packet's src/dst against
 		// the endpoints collected from SDP in requests vs responses.
 		srcEp := Endpoint{IP: srcIP, Port: srcPort}
@@ -121,8 +137,50 @@ func processRTPPkt(
 	return nil
 }
 
+// sweepIdleStreams closes stream writers whose call has ended (BYE seen)
+// or whose lastSeen is older than idleSec relative to currentTs. Each closed
+// stream is finalized (jitter/loss/MOS recorded onto the Call) and added to
+// closedStreams so subsequent packets for the same SSRC are discarded.
+// idleSec <= 0 disables the idle check (BYE-based eviction still runs).
+// Returns the number of streams closed.
+func sweepIdleStreams(
+	currentTs float64,
+	idleSec float64,
+	pcapWriters map[rtpKey]*PcapWriter,
+	wavWriters map[rtpKey]audioWriter,
+	stateMap map[rtpKey]*rtpStreamState,
+	closedStreams map[rtpKey]struct{},
+) int {
+	closed := 0
+	for key, state := range stateMap {
+		idle := idleSec > 0 && state.lastSeen > 0 && (currentTs-state.lastSeen) > idleSec
+		byeClosed := state.call.DisconnectedAt > 0 && currentTs > state.call.DisconnectedAt+byeGraceSeconds
+		if !idle && !byeClosed {
+			continue
+		}
+		state.finalize()
+		if pw, ok := pcapWriters[key]; ok {
+			if pw != nil {
+				pw.Close()
+			}
+			delete(pcapWriters, key)
+		}
+		if aw, ok := wavWriters[key]; ok {
+			aw.close()
+			delete(wavWriters, key)
+		}
+		delete(stateMap, key)
+		closedStreams[key] = struct{}{}
+		closed++
+	}
+	return closed
+}
+
+// rtpSweepInterval is how many RTP packets between idle-stream sweeps.
+const rtpSweepInterval = 10000
+
 // extractRTP streams RTP packets from one or more PCAP files and writes per-SSRC files.
-func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call, trimRing, noRTPPcap bool) error {
+func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call, trimRing, noRTPPcap bool, rtpIdleSec float64) error {
 	var totalBytes int64
 	for _, f := range pcapFiles {
 		if fi, err := os.Stat(f); err == nil {
@@ -133,6 +191,7 @@ func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call, trimRing, no
 	pcapWriters := make(map[rtpKey]*PcapWriter)
 	wavWriters := make(map[rtpKey]audioWriter)
 	stateMap := make(map[rtpKey]*rtpStreamState)
+	closedStreams := make(map[rtpKey]struct{})
 	prog := newProgress(totalBytes)
 
 	defer func() {
@@ -150,6 +209,7 @@ func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call, trimRing, no
 	}()
 
 	var bytesOffset int64
+	var rtpPkts int
 	for i, pcapFile := range pcapFiles {
 		if len(pcapFiles) > 1 {
 			logEvent("[file]  %s (%d/%d)", filepath.Base(pcapFile), i+1, len(pcapFiles))
@@ -172,7 +232,7 @@ func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call, trimRing, no
 			}
 
 			srcIP, dstIP, srcPort, dstPort, udpPayload := parseUDP(data, datalink)
-			extra := fmt.Sprintf("%d streams", len(pcapWriters))
+			extra := fmt.Sprintf("%d streams", len(stateMap))
 			if len(udpPayload) == 0 {
 				prog.tick(bytesOffset+reader.BytesRead(), extra)
 				continue
@@ -187,9 +247,14 @@ func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call, trimRing, no
 			if err := processRTPPkt(
 				ts, srcIP, dstIP, srcPort, dstPort,
 				data, udpPayload, datalink,
-				endpointMap, pcapWriters, wavWriters, stateMap, "", trimRing, noRTPPcap,
+				endpointMap, pcapWriters, wavWriters, stateMap, closedStreams, "", trimRing, noRTPPcap,
 			); err != nil {
 				logEvent("[warn]  %v", err)
+			}
+
+			rtpPkts++
+			if rtpPkts%rtpSweepInterval == 0 {
+				sweepIdleStreams(ts, rtpIdleSec, pcapWriters, wavWriters, stateMap, closedStreams)
 			}
 
 			prog.tick(bytesOffset+reader.BytesRead(), extra)
@@ -199,7 +264,7 @@ func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call, trimRing, no
 		reader.Close()
 	}
 
-	prog.done(totalBytes, fmt.Sprintf("%d streams", len(pcapWriters)))
+	prog.done(totalBytes, fmt.Sprintf("%d streams", len(stateMap)+len(closedStreams)))
 	return nil
 }
 

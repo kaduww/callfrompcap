@@ -35,6 +35,7 @@ func main() {
 	mixAudioFlag := flag.Bool("mix-audio", false, "mix per-SSRC WAV files into a single rtp_mixed.wav per call (requires ffmpeg)")
 	trimRingFlag  := flag.Bool("trim-ring", false, "remove ring-tone bursts from the beginning of early-media audio streams")
 	noRTPPcapFlag := flag.Bool("no-rtp-pcap", false, "skip writing per-SSRC RTP PCAP files (keep WAV only)")
+	rtpIdleFlag   := flag.Float64("rtp-idle-seconds", 60.0, "close RTP stream files after this many seconds of capture-time inactivity (0 = never)")
 
 	// Support long form --output as alias for -o
 	flag.StringVar(outputDir, "output", "./output", "output directory (long form)")
@@ -54,6 +55,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  --mix-audio          mix per-SSRC WAV files into rtp_mixed.wav per call (requires ffmpeg)\n")
 		fmt.Fprintf(os.Stderr, "  --trim-ring          remove ring-tone bursts from early-media audio streams\n")
 		fmt.Fprintf(os.Stderr, "  --no-rtp-pcap        skip per-SSRC RTP PCAP files (WAV only)\n")
+		fmt.Fprintf(os.Stderr, "  --rtp-idle-seconds <n>  close RTP streams after n seconds of capture-time inactivity (default: 60, 0 = never)\n")
 	}
 
 	flag.Parse()
@@ -140,7 +142,7 @@ func main() {
 		fmt.Printf("      %d call(s) found\n", len(calls))
 
 		fmt.Printf("[2/3] Extracting RTP streams from %d file(s) ...\n", nFiles)
-		if err := extractRTP(pcapFiles, endpointMap, *trimRingFlag, *noRTPPcapFlag); err != nil {
+		if err := extractRTP(pcapFiles, endpointMap, *trimRingFlag, *noRTPPcapFlag, *rtpIdleFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 			os.Exit(1)
 		}
@@ -162,7 +164,7 @@ func main() {
 	} else {
 		// Default: single-pass (reads files once each)
 		fmt.Printf("[1/2] Analyzing %d file(s)  →  %s  (single-pass SIP + RTP)\n", nFiles, out)
-		calls, err := analyze(pcapFiles, out, methodFilter, *trimRingFlag, *noRTPPcapFlag)
+		calls, err := analyze(pcapFiles, out, methodFilter, *trimRingFlag, *noRTPPcapFlag, *rtpIdleFlag)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 			os.Exit(1)

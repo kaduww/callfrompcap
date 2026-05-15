@@ -17,6 +17,9 @@ type rtpStreamState struct {
 	lastArrival float64 // capture timestamp of previous packet
 	lastRTPTS   uint32  // RTP timestamp of previous packet
 	jitterAcc   float64 // running estimate in RTP timestamp units
+
+	// idle eviction: capture timestamp of most recent packet (any seq)
+	lastSeen float64
 }
 
 func newRTPStreamState(call *Call, clockRate int) *rtpStreamState {
@@ -30,6 +33,7 @@ func newRTPStreamState(call *Call, clockRate int) *rtpStreamState {
 // arrival is the packet capture timestamp in seconds.
 func (s *rtpStreamState) update(seq uint16, rtpTS uint32, arrival float64) {
 	s.received++
+	s.lastSeen = arrival
 	if !s.hasFirst {
 		s.firstSeq = seq
 		s.lastSeq = seq

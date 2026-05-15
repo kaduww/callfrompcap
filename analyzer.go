@@ -11,7 +11,7 @@ import (
 // processing both SIP and RTP packets while maintaining a shared call context.
 // methodFilter: set of uppercase SIP methods to accept (empty = accept all).
 // Returns the map of calls (call_id -> *Call).
-func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struct{}, trimRing, noRTPPcap bool) (map[string]*Call, error) {
+func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struct{}, trimRing, noRTPPcap bool, rtpIdleSec float64) (map[string]*Call, error) {
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating output directory: %w", err)
 	}
@@ -30,6 +30,7 @@ func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struc
 	pcapWriters := make(map[rtpKey]*PcapWriter)
 	wavWriters := make(map[rtpKey]audioWriter)
 	stateMap := make(map[rtpKey]*rtpStreamState)
+	closedStreams := make(map[rtpKey]struct{})
 	cache := newSipFileCache()
 	prog := newProgress(totalBytes)
 
@@ -49,6 +50,7 @@ func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struc
 	}()
 
 	var bytesOffset int64
+	var rtpPkts int
 	for i, pcapFile := range pcapFiles {
 		if len(pcapFiles) > 1 {
 			logEvent("[file]  %s (%d/%d)", filepath.Base(pcapFile), i+1, len(pcapFiles))
@@ -71,7 +73,7 @@ func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struc
 			}
 
 			srcIP, dstIP, srcPort, dstPort, udpPayload := parseUDP(data, datalink)
-			extra := fmt.Sprintf("%d calls  %d streams", len(calls), len(pcapWriters))
+			extra := fmt.Sprintf("%d calls  %d streams", len(calls), len(stateMap))
 			if len(udpPayload) == 0 {
 				prog.tick(bytesOffset+reader.BytesRead(), extra)
 				continue
@@ -82,9 +84,13 @@ func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struc
 				if err := processRTPPkt(
 					ts, srcIP, dstIP, srcPort, dstPort,
 					data, udpPayload, datalink,
-					endpointMap, pcapWriters, wavWriters, stateMap, outputDir, trimRing, noRTPPcap,
+					endpointMap, pcapWriters, wavWriters, stateMap, closedStreams, outputDir, trimRing, noRTPPcap,
 				); err != nil {
 					logEvent("[warn]  %v", err)
+				}
+				rtpPkts++
+				if rtpPkts%rtpSweepInterval == 0 {
+					sweepIdleStreams(ts, rtpIdleSec, pcapWriters, wavWriters, stateMap, closedStreams)
 				}
 			} else if udpPayload[0] >= 0x20 && udpPayload[0] <= 0x7e {
 				// Printable ASCII start — likely SIP
@@ -108,6 +114,6 @@ func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struc
 		reader.Close()
 	}
 
-	prog.done(totalBytes, fmt.Sprintf("%d calls  %d streams", len(calls), len(pcapWriters)))
+	prog.done(totalBytes, fmt.Sprintf("%d calls  %d streams", len(calls), len(stateMap)+len(closedStreams)))
 	return calls, nil
 }

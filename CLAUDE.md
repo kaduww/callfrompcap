@@ -70,6 +70,7 @@ pcap file → extractRTP(endpointMap)
 --two-pass             read file twice (SIP then RTP)
 --method <csv>         initial SIP methods to process, e.g. INVITE or INVITE,REGISTER
 --sip-code <csv>       final response codes to include in index.csv, e.g. 200 or 200,486
+--rtp-idle-seconds <n> close RTP streams after n s of capture-time inactivity (default 60, 0 = never)
 ```
 
 ## Key Design Rules
@@ -85,6 +86,7 @@ pcap file → extractRTP(endpointMap)
 - SSRC: extracted from RTP header bytes 8–11 (big-endian uint32), formatted as `rtp_0a1b2c3d.pcap`.
 - **Audio decode priority** (`makeWriter`): (1) static G.711 PT 0/8; (2) dynamic PT from rtpmap matching PCMU/PCMA/G722/G729; (3) static ffmpeg PTs 9=G.722, 18=G.729.
 - **`_SipFileCache`**: LRU of 500 open `sip_trace.txt` file handles — avoids open/close per packet, which is the dominant bottleneck for SIP-heavy captures.
+- **RTP stream idle eviction** (`sweepIdleStreams` in `rtpextractor.go`): every 10 000 RTP packets, finalizes and closes pcap/wav writers for streams whose `lastSeen` (capture timestamp of last packet) is older than `--rtp-idle-seconds`, or whose call has seen a BYE more than 1 s in the past. Closed `rtpKey`s are tracked in `closedStreams`; late packets for the same SSRC are dropped, and new streams for a call past its BYE+grace are refused. Bounds peak memory in long captures with many short calls.
 - **pcapng**: not supported — returns an error with the tshark conversion command.
 
 ## Optional dependency

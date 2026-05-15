@@ -123,6 +123,9 @@ winget install Gyan.FFmpeg
 
 # WAV only — skip per-SSRC .pcap files
 ./callfrompcap capture.pcap -o ./output --no-rtp-pcap
+
+# Close idle RTP streams aggressively (low memory; long captures)
+./callfrompcap capture.pcap -o ./output --rtp-idle-seconds 30
 ```
 
 ### Options
@@ -138,6 +141,7 @@ winget install Gyan.FFmpeg
 | `--mix-audio` | — | Mix all WAV streams of each call into `rtp_mixed.wav` (requires ffmpeg) |
 | `--trim-ring` | — | Detect and remove ring-tone bursts from early-media audio (G.711 only) |
 | `--no-rtp-pcap` | — | Skip per-SSRC RTP `.pcap` files (keep `.wav` only) |
+| `--rtp-idle-seconds` | `60` | Close RTP streams after this many seconds of capture-time inactivity (0 = never) |
 | `--verbose` | — | Print per-event output; hides the progress bar |
 
 ### `--method`
@@ -202,6 +206,22 @@ Skips creation of the per-SSRC `rtp_*.pcap` files; only the `.wav` files (plus t
 
 The PCAP writers are never created (not written then deleted), so this also saves I/O time on large captures.
 
+### `--rtp-idle-seconds`
+
+Caps memory usage on long captures by closing RTP stream writers (`.pcap` + `.wav` + jitter/loss state) once they go quiet. After `n` seconds of capture-time inactivity — or once the call's BYE was seen more than 1 s in the past — the stream is finalized, its metrics are recorded onto the call, and its file handles are released.
+
+```bash
+./callfrompcap big.pcap -o ./output --rtp-idle-seconds 60   # default
+./callfrompcap big.pcap -o ./output --rtp-idle-seconds 30   # more aggressive (low memory)
+./callfrompcap big.pcap -o ./output --rtp-idle-seconds 0    # disable idle eviction
+```
+
+How it works: every 10 000 RTP packets, the tool sweeps active streams and closes any whose last packet arrived more than `n` seconds ago (capture clock, not wall clock). Closed streams are remembered — any further packets for the same SSRC are silently dropped, so the WAV file is never reopened/truncated. New streams for a call whose BYE is already in the past (plus a 1 s grace) are refused outright.
+
+- Without this, the peak memory footprint scales with **total streams seen in the capture** (each open `WavWriter` holds a 64 KB buffer + file descriptor)
+- With this, peak footprint scales with **streams active simultaneously** — typically orders of magnitude smaller
+- Tradeoff: very long holds with no RTP (music-on-hold gaps > `n` seconds on the same SSRC) get split prematurely. Raise the value (e.g. `120`) if your traffic does this; set `0` to keep the old behavior
+
 ### Operation modes
 
 #### Single-pass (default)
@@ -257,13 +277,15 @@ ulimit -n 65536
 
 ### RAM estimate
 
-| Calls in PCAP | RAM required |
+Each open RTP stream keeps a 64 KB WAV write buffer plus a file descriptor, so peak memory tracks the number of streams that are active **simultaneously** — not the total seen across the whole capture. `--rtp-idle-seconds` (default 60) finalizes and closes streams that go quiet, keeping the working set bounded even on multi-hour captures with hundreds of thousands of short calls.
+
+| Simultaneously active calls | RAM required |
 |---|---|
 | up to 1,000 | < 100 MB |
 | 1,000 – 10,000 | ~200 MB |
 | above 10,000 | ~500 MB |
 
-File size (GB) **does not affect** memory usage — processing is entirely streaming, one packet at a time.
+File size (GB) **does not affect** memory usage — processing is entirely streaming, one packet at a time. For very high concurrency, lower `--rtp-idle-seconds` (e.g. `30`) to release idle WAV/pcap handles sooner; set to `0` only if you have spare RAM and want every stream kept open until end-of-file.
 
 ## How it works
 
