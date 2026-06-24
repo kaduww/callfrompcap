@@ -226,6 +226,10 @@ func extractRTP(pcapFiles []string, endpointMap map[Endpoint]*Call, trimRing, no
 			if err == io.EOF {
 				break
 			}
+			if IsTruncated(err) {
+				warnTruncated(pcapFile, err)
+				break
+			}
 			if err != nil {
 				reader.Close()
 				return fmt.Errorf("%s: reading packet: %w", pcapFile, err)

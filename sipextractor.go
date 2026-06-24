@@ -244,6 +244,10 @@ func extractCalls(pcapFiles []string, outputDir string, methodFilter map[string]
 			if err == io.EOF {
 				break
 			}
+			if IsTruncated(err) {
+				warnTruncated(pcapFile, err)
+				break
+			}
 			if err != nil {
 				reader.Close()
 				return nil, nil, fmt.Errorf("%s: reading packet: %w", pcapFile, err)

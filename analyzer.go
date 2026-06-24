@@ -67,6 +67,10 @@ func analyze(pcapFiles []string, outputDir string, methodFilter map[string]struc
 			if err == io.EOF {
 				break
 			}
+			if IsTruncated(err) {
+				warnTruncated(pcapFile, err)
+				break
+			}
 			if err != nil {
 				reader.Close()
 				return nil, fmt.Errorf("%s: reading packet: %w", pcapFile, err)

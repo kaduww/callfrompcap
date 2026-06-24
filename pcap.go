@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -131,6 +132,14 @@ func (p *PcapReader) Next() (ts float64, data []byte, err error) {
 	}
 	p.bytesRead += 16 + int64(hdr.InclLen) // 16 = packet record header (4×uint32)
 	return ts, p.buf, nil
+}
+
+// IsTruncated reports whether err from Next() means the file ended in the
+// middle of a packet record (a truncated or corrupt capture) rather than at a
+// clean record boundary. Callers should treat this as end-of-file, keeping the
+// packets read so far, instead of aborting the whole run.
+func IsTruncated(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // BytesRead returns the number of bytes consumed from the file so far.

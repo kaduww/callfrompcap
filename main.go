@@ -24,6 +24,14 @@ func logEvent(format string, args ...any) {
 	fmt.Printf(time.Now().Format("15:04:05")+"  "+format+"\n", args...)
 }
 
+// warnTruncated reports a truncated/corrupt capture to stderr. Printed
+// regardless of --verbose because it signals incomplete input: processing
+// stops at the last complete packet and results reflect only what was read.
+func warnTruncated(pcapFile string, err error) {
+	fmt.Fprintf(os.Stderr, "\nWARNING: %s: truncated capture, stopping at last complete packet (%v); results reflect data read so far\n",
+		filepath.Base(pcapFile), err)
+}
+
 func main() {
 	// Define flags
 	outputDir := flag.String("o", "./output", "output directory")
