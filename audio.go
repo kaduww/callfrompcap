@@ -81,6 +81,11 @@ func rtpAudioPayload(rtpBytes []byte) []byte {
 // wavHeader holds metadata for a WAV file being written.
 const wavHeaderSize = 44 // RIFF(4)+size(4)+WAVE(4) + fmt (4)+chunksize(4)+pcm(2)+mono(2)+rate(4)+byterate(4)+blockalign(2)+bits(2) + data(4)+datasize(4)
 
+// maxGapSeconds caps how much silence a single RTP timestamp gap may inject,
+// guarding against garbage timestamps producing a multi-gigabyte WAV. Real
+// silence-suppression/hold gaps are well under this.
+const maxGapSeconds = 30
+
 // WavWriter writes a 16-bit mono PCM WAV file incrementally.
 // Uses WriteAt to patch the header sizes on Close.
 type WavWriter struct {
@@ -89,6 +94,15 @@ type WavWriter struct {
 	sampleRate int
 	dataBytes  int64
 	buf        []byte // reusable G.711 decode buffer; grown as needed
+
+	// RTP-timestamp-aware gap tracking. Without this, silence-suppression
+	// (DTX) gaps and lost packets are dropped, compressing the timeline and
+	// making playback sound accelerated. For G.711 the RTP timestamp unit is
+	// one 8 kHz sample, so timestamp deltas map 1:1 onto output samples.
+	lastRTPTS   uint32
+	lastSamples int
+	haveLast    bool
+	silence     []byte // reusable zero buffer for gap padding (always all-zero)
 }
 
 // newWavWriter creates a new WAV file at path.
@@ -157,6 +171,25 @@ func (w *WavWriter) writePacket(rtpPayload []byte, pt int, rtpMap map[int]CodecI
 		}
 	}
 
+	// RTP-timestamp-aware gap fill: insert silence for the time lost to DTX
+	// silence suppression or dropped packets, so the WAV stays in real time.
+	if len(rtpPayload) >= 12 {
+		rtpTS := binary.BigEndian.Uint32(rtpPayload[4:8])
+		if w.haveLast {
+			delta := int32(rtpTS - w.lastRTPTS) // samples since previous packet start
+			gap := int(delta) - w.lastSamples   // 0 when contiguous; >0 on a gap
+			if gap > 0 {
+				if maxGap := w.sampleRate * maxGapSeconds; gap > maxGap {
+					gap = maxGap
+				}
+				w.writeSilence(gap)
+			}
+		}
+		w.lastRTPTS = rtpTS
+		w.lastSamples = len(audio)
+		w.haveLast = true
+	}
+
 	// Decode each sample into the reusable buffer, growing it only when needed
 	need := len(audio) * 2
 	if cap(w.buf) < need {
@@ -177,6 +210,18 @@ func (w *WavWriter) writePacket(rtpPayload []byte, pt int, rtpMap map[int]CodecI
 	}
 
 	if _, err := w.bw.Write(w.buf); err == nil {
+		w.dataBytes += int64(need)
+	}
+}
+
+// writeSilence appends `samples` 16-bit PCM silence samples (zero) to the WAV
+// data, reusing an all-zero buffer. Used to bridge RTP timestamp gaps.
+func (w *WavWriter) writeSilence(samples int) {
+	need := samples * 2
+	if cap(w.silence) < need {
+		w.silence = make([]byte, need) // make() zero-fills
+	}
+	if _, err := w.bw.Write(w.silence[:need]); err == nil {
 		w.dataBytes += int64(need)
 	}
 }
