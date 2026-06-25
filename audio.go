@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -226,6 +227,14 @@ func (w *WavWriter) writeSilence(samples int) {
 	}
 }
 
+// writeRawPCM appends already-decoded 16-bit PCM bytes to the WAV data.
+// Used by the ffmpeg path, which decodes whole contiguous segments at once.
+func (w *WavWriter) writeRawPCM(pcm []byte) {
+	if _, err := w.bw.Write(pcm); err == nil {
+		w.dataBytes += int64(len(pcm))
+	}
+}
+
 // close flushes the write buffer, patches the WAV header with correct sizes, and closes the file.
 func (w *WavWriter) close() error {
 	if err := w.bw.Flush(); err != nil {
@@ -251,53 +260,136 @@ func (w *WavWriter) close() error {
 	return w.f.Close()
 }
 
-// FfmpegWriter pipes raw RTP payloads to ffmpeg for G.729/G.722 decode.
+// ffFrame is one buffered encoded audio payload with its RTP timestamp.
+type ffFrame struct {
+	rtpTS uint32
+	data  []byte
+}
+
+// FfmpegWriter buffers encoded G.722/G.729 RTP payloads with their RTP
+// timestamps, then on close splits the stream into gap-free segments, decodes
+// each segment with ffmpeg, and assembles a WAV inserting PCM silence for the
+// gaps (DTX silence suppression, lost packets). This keeps audio in real time;
+// piping straight to ffmpeg would drop the gaps and sound accelerated.
 type FfmpegWriter struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	dead   bool
+	path    string
+	format  string // ffmpeg input format: "g722" or "g729"
+	outRate int    // decoded PCM sample rate (G.722 → 16000, G.729 → 8000)
+	frames  []ffFrame
 }
 
-// newFfmpegWriter starts an ffmpeg process writing to path.
-// format is the ffmpeg input format string (e.g. "g722", "g729").
+// newFfmpegWriter creates a buffering writer for the given codec format.
+// format is the ffmpeg input format string ("g722" or "g729").
 func newFfmpegWriter(path, format string) (*FfmpegWriter, error) {
-	args := []string{"-y", "-f", format, "-ac", "1", "-i", "pipe:0", path}
-	cmd := exec.Command("ffmpeg", args...)
-	cmd.Stderr = io.Discard
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, fmt.Errorf("ffmpeg stdin pipe: %w", err)
+	outRate := 8000
+	if format == "g722" {
+		outRate = 16000 // G.722 RTP clock is 8 kHz but it decodes to 16 kHz audio
 	}
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("starting ffmpeg: %w", err)
-	}
-
-	return &FfmpegWriter{cmd: cmd, stdin: stdin}, nil
+	return &FfmpegWriter{path: path, format: format, outRate: outRate}, nil
 }
 
-// writePacket sends raw RTP audio payload bytes to ffmpeg stdin.
-// payload is the full RTP packet; the RTP header is stripped first.
+// writePacket buffers the encoded payload and its RTP timestamp.
 func (w *FfmpegWriter) writePacket(_ float64, payload []byte) {
-	if w.dead {
+	if len(payload) < 12 {
 		return
 	}
 	audio := rtpAudioPayload(payload)
 	if len(audio) == 0 {
 		return
 	}
-	if _, err := w.stdin.Write(audio); err != nil {
-		w.dead = true
-	}
+	rtpTS := binary.BigEndian.Uint32(payload[4:8])
+	w.frames = append(w.frames, ffFrame{rtpTS: rtpTS, data: append([]byte(nil), audio...)})
 }
 
-// close closes ffmpeg stdin and waits for the process to finish.
-func (w *FfmpegWriter) close() error {
-	if !w.dead {
-		w.stdin.Close()
+// payloadTicks returns the duration of one encoded payload in 8 kHz RTP ticks.
+// G.722: 64 kbit/s → 1 byte per tick. G.729: 10 bytes per 10 ms (80 ticks)
+// frame; a trailing short frame (e.g. 2-byte SID) counts as one more frame.
+func (w *FfmpegWriter) payloadTicks(n int) int {
+	if w.format == "g722" {
+		return n
 	}
-	return w.cmd.Wait()
+	ticks := (n / 10) * 80
+	if n%10 != 0 {
+		ticks += 80
+	}
+	return ticks
+}
+
+// decodeSegment runs ffmpeg to decode concatenated encoded frames to raw
+// 16-bit mono PCM at w.outRate, returning the PCM bytes.
+func (w *FfmpegWriter) decodeSegment(encoded []byte) ([]byte, error) {
+	cmd := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-f", w.format, "-ac", "1", "-i", "pipe:0",
+		"-f", "s16le", "-ac", "1", "-ar", fmt.Sprint(w.outRate), "pipe:1",
+	)
+	cmd.Stdin = bytes.NewReader(encoded)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+// close segments the buffered frames by RTP timestamp gaps, decodes each
+// segment, and writes the final WAV with silence bridging the gaps.
+func (w *FfmpegWriter) close() error {
+	if len(w.frames) == 0 {
+		return nil // nothing decodable; no file created
+	}
+
+	ww, err := newWavWriter(w.path, w.outRate)
+	if err != nil {
+		return err
+	}
+
+	// ticksToSamples converts an 8 kHz RTP tick count to output PCM samples,
+	// capped at maxGapSeconds to guard against garbage timestamps.
+	ticksToSamples := func(ticks int) int {
+		samples := ticks * w.outRate / 8000
+		if max := maxGapSeconds * w.outRate; samples > max {
+			samples = max
+		}
+		return samples
+	}
+
+	var seg bytes.Buffer
+	flush := func() error {
+		if seg.Len() == 0 {
+			return nil
+		}
+		pcm, derr := w.decodeSegment(seg.Bytes())
+		seg.Reset()
+		if derr != nil {
+			logEvent("[warn]  ffmpeg decode (%s): %v", w.format, derr)
+			return nil // skip this segment's audio; gaps already kept alignment
+		}
+		ww.writeRawPCM(pcm)
+		return nil
+	}
+
+	seg.Write(w.frames[0].data)
+	for i := 1; i < len(w.frames); i++ {
+		prev, cur := w.frames[i-1], w.frames[i]
+		gap := int(int32(cur.rtpTS-prev.rtpTS)) - w.payloadTicks(len(prev.data))
+		if gap > 0 {
+			// Close the current contiguous segment, emit silence, start fresh.
+			if err := flush(); err != nil {
+				ww.close()
+				return err
+			}
+			ww.writeSilence(ticksToSamples(gap))
+		}
+		seg.Write(cur.data)
+	}
+	if err := flush(); err != nil {
+		ww.close()
+		return err
+	}
+
+	return ww.close()
 }
 
 // audioWriter is the common interface for WavWriter and FfmpegWriter.
